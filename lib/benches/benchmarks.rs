@@ -4,7 +4,8 @@
 
 use atomic_lib::utils::random_string;
 use atomic_lib::*;
-use criterion::{criterion_group, criterion_main, Criterion};
+use atomic_lib::resources::PropVals;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 #[cfg(feature = "db")]
 use atomic_lib::similarity::SimilarityAlgorithm;
@@ -224,14 +225,15 @@ fn search_benchmarks(c: &mut Criterion) {
     });
 
     // Benchmark terraphim fuzzy search if feature is enabled
-    #[cfg(feature = "terraphim-search")]
-    c.bench_function("search/terraphim_fuzzy_search", |b| {
-        b.iter(|| {
-            search_state
-                .terraphim_fuzzy_search("atomic", 0.6, 10)
-                .unwrap()
-        })
-    });
+    // NOTE: terraphim-search feature is not defined in Cargo.toml, removing
+    // #[cfg(feature = "terraphim-search")]
+    // c.bench_function("search/terraphim_fuzzy_search", |b| {
+    //     b.iter(|| {
+    //         search_state
+    //             .terraphim_fuzzy_search("atomic", 0.6, 10)
+    //             .unwrap()
+    //     })
+    // });
 
     // Benchmark cache performance by running searches again (should hit cache)
     c.bench_function("search/text_search_cached", |b| {
@@ -319,8 +321,77 @@ fn search_benchmarks(c: &mut Criterion) {
 #[cfg(feature = "db")]
 criterion_group!(search_benches, search_benchmarks);
 
+// PERFORMANCE OPTIMIZATION BENCHMARKS
+// These benchmarks validate the performance improvements from our optimization plan
+
 #[cfg(feature = "db")]
-criterion_group!(benches, criterion_benchmark, search_benchmarks);
+fn benchmark_optimizations(c: &mut Criterion) {
+    let store = Db::init_temp("benchmark_optimizations").unwrap();
+    let search_state = search_sqlite::SqliteSearchState::new(store.clone()).unwrap();
+    
+    // Add some test data for realistic benchmarks
+    for i in 0..100 {
+        let mut resource = Resource::new_generate_subject(&store).unwrap();
+        resource.set_unsafe(
+            urls::DESCRIPTION.into(),
+            Value::Markdown(format!("Test content with search terms example {}", i)),
+        );
+        let conn = store.get_connection().unwrap();
+        search_state.add_resource(&resource, &conn).unwrap();
+    }
+    
+    // Benchmark 1: Fuzzy Search Optimization (Priority 1)
+    c.bench_function("optimized/fuzzy_search_batch", |b| {
+        b.iter(|| {
+            search_state.fuzzy_search(black_box("example"), black_box(2), black_box(10)).unwrap()
+        })
+    });
+    
+    // Benchmark 2: Fuzzy Search with Complex Query (tests string sanitization indirectly)
+    c.bench_function("optimized/fuzzy_search_complex", |b| {
+        b.iter(|| {
+            // Test with complex query containing special characters
+            search_state.fuzzy_search(black_box("https://example"), black_box(2), black_box(5)).unwrap()
+        })
+    });
+    
+    // Benchmark 3: Serialization Optimization (Priority 3)
+    c.bench_function("optimized/propvals_to_json_ad_map", |b| {
+        let mut propvals = PropVals::new();
+        for i in 0..10 {
+            let subject = format!("https://example.com/resource{}", i);
+            propvals.insert(
+                subject.into(),
+                Value::Markdown(format!("Test content {}", i)),
+            );
+        }
+        
+        b.iter(|| {
+            serialize::propvals_to_json_ad_map(black_box(&propvals), black_box(None)).unwrap()
+        })
+    });
+    
+    // Benchmark 4: Combined Search Performance
+    c.bench_function("optimized/text_search", |b| {
+        b.iter(|| {
+            search_state.text_search(black_box("content"), black_box(10)).unwrap()
+        })
+    });
+    
+    // Benchmark 5: Atomic Operations Performance (AtomicU64 optimization)
+    c.bench_function("optimized/atomic_operations", |b| {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let counter = AtomicU64::new(0);
+        
+        b.iter(|| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            black_box(counter.load(Ordering::SeqCst));
+        })
+    });
+}
+
+#[cfg(feature = "db")]
+criterion_group!(benches, criterion_benchmark, search_benchmarks, benchmark_optimizations);
 
 #[cfg(not(feature = "db"))]
 criterion_group!(benches, criterion_benchmark);

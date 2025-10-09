@@ -96,7 +96,7 @@ impl Handler<AddResourceMessage> for DbWriter {
             msg.overwrite_existing,
         );
 
-        if let Err(_) = msg.respond_to.send(result) {
+        if msg.respond_to.send(result).is_err() {
             tracing::warn!("Failed to send AddResource response - receiver dropped");
         }
     }
@@ -113,7 +113,7 @@ impl Handler<RemoveResourceMessage> for DbWriter {
     fn handle(&mut self, msg: RemoveResourceMessage, _ctx: &mut Self::Context) {
         let result = self.db.remove_resource(&msg.subject);
 
-        if let Err(_) = msg.respond_to.send(result) {
+        if msg.respond_to.send(result).is_err() {
             tracing::warn!("Failed to send RemoveResource response - receiver dropped");
         }
     }
@@ -139,12 +139,12 @@ impl Handler<ApplyCommitMessage> for DbWriter {
                 };
                 self.commit_monitor.do_send(commit_message);
 
-                if let Err(_) = msg.respond_to.send(result) {
+                if msg.respond_to.send(result).is_err() {
                     tracing::warn!("Failed to send ApplyCommit response - receiver dropped");
                 }
             }
             Err(_) => {
-                if let Err(_) = msg.respond_to.send(result) {
+                if msg.respond_to.send(result).is_err() {
                     tracing::warn!("Failed to send ApplyCommit response - receiver dropped");
                 }
             }
@@ -169,7 +169,7 @@ impl Handler<UpdateResourceMessage> for DbWriter {
             true, // overwrite_existing
         );
 
-        if let Err(_) = msg.respond_to.send(result) {
+        if msg.respond_to.send(result).is_err() {
             tracing::warn!("Failed to send UpdateResource response - receiver dropped");
         }
     }

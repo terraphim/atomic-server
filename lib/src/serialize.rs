@@ -71,7 +71,9 @@ pub fn propvals_to_json_ad_map(
     propvals: &PropVals,
     subject: Option<String>,
 ) -> AtomicResult<serde_json::Value> {
-    let mut root = Map::new();
+    // OPTIMIZED: Pre-allocate map capacity to reduce reallocations
+    let mut root = Map::with_capacity(propvals.len() + subject.is_some() as usize);
+    
     for (prop_url, value) in propvals.iter() {
         root.insert(prop_url.clone(), val_to_serde(value.clone())?);
     }
