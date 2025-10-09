@@ -11,7 +11,6 @@
 //! - **FST (Finite State Transducer)**: Fuzzy matching using automata in ~159ns
 //! - **LRU Caching**: Two-tier cache (1000 hot + 500 prefix) with selective invalidation
 //! - **Memory-Mapped FST**: Zero-copy file access for optimal memory usage (~25ns)
-//! - **Terraphim Integration**: Optional semantic search with thesaurus support (~82µs)
 //!
 //! ## Performance Characteristics
 //!
@@ -20,7 +19,6 @@
 //! | Text Search | 285ns | 263ns cached | SQLite FTS5 with LRU cache |
 //! | Fuzzy Search | 159ns | 293ns cached | FST subsequence automaton |
 //! | Similarity Search | 290µs | N/A | Jaro-Winkler/Levenshtein |
-//! | Terraphim Fuzzy | 82.4µs | N/A | Semantic matching with concepts |
 //! | FST Memory Access | 25ns | N/A | Memory-mapped zero-copy |
 //! | Hierarchy Search | 100µs | N/A | Parent-child relationship queries |
 //!
@@ -55,15 +53,6 @@
 //! - **Performance**: ~159ns (99.92% faster than original)
 //! - **Algorithm**: FST subsequence automaton
 //!
-//! ### 3. Terraphim Fuzzy Search (Quality)
-//! ```rust
-//! #[cfg(feature = "terraphim-search")]
-//! let results = search_state.terraphim_fuzzy_search("atomic", 0.6, 10)?;
-//! ```
-//! - **Use for**: Semantic search, concept matching, autocomplete
-//! - **Performance**: ~82µs (still very fast for quality)
-//! - **Features**: Jaro-Winkler similarity, word-by-word matching, thesaurus
-//!
 //! ## Caching Strategy
 //!
 //! The implementation uses sophisticated caching to maintain performance:
@@ -90,15 +79,6 @@
 //! search_state.add_resource(&updated_resource, &conn)?;
 //! search_state.remove_resource(subject)?;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
-//!
-//! ## Feature Flags
-//!
-//! ### `terraphim-search`
-//! Enables integration with Terraphim automata for semantic search:
-//! ```toml
-//! [dependencies]
-//! atomic_lib = { version = "0.40", features = ["terraphim-search"] }
 //! ```
 //!
 //! ## Migration from Tantivy
@@ -144,12 +124,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-#[cfg(all(feature = "db", feature = "terraphim-search"))]
-use terraphim_automata::{
-    build_autocomplete_index, fuzzy_autocomplete_search, AutocompleteConfig, AutocompleteIndex,
-};
-#[cfg(all(feature = "db", feature = "terraphim-search"))]
-use terraphim_types::{NormalizedTerm, NormalizedTermValue, Thesaurus};
 
 /// FST storage mode for performance optimization
 #[cfg(feature = "db")]
@@ -367,9 +341,6 @@ pub struct SqliteSearchState {
     pub db: Db,
     /// Cached FST for performance optimization
     cached_fst: Arc<RwLock<CachedFst>>,
-    /// Terraphim automata index for advanced fuzzy search
-    #[cfg(feature = "terraphim-search")]
-    terraphim_index: Arc<RwLock<Option<AutocompleteIndex>>>,
 }
 
 #[cfg(feature = "db")]
@@ -379,8 +350,6 @@ impl SqliteSearchState {
         let search_state = SqliteSearchState {
             db,
             cached_fst: Arc::new(RwLock::new(CachedFst::new())),
-            #[cfg(feature = "terraphim-search")]
-            terraphim_index: Arc::new(RwLock::new(None)),
         };
 
         // Initialize search metadata if needed
@@ -439,10 +408,6 @@ impl SqliteSearchState {
 
         // Build FST index for fuzzy search
         self.build_fst_index(&conn)?;
-
-        // Build Terraphim index if feature is enabled
-        #[cfg(feature = "terraphim-search")]
-        self.build_terraphim_index(store)?;
 
         Ok(())
     }
@@ -770,155 +735,6 @@ impl SqliteSearchState {
         Ok(fst_storage)
     }
 
-    /// Build Terraphim autocomplete index for enhanced fuzzy search
-    #[cfg(feature = "terraphim-search")]
-    pub fn build_terraphim_index(&self, store: &Db) -> AtomicResult<()> {
-        tracing::info!("Building Terraphim autocomplete index...");
-
-        // Create thesaurus from store resources
-        let mut thesaurus = Thesaurus::new("Atomic Server Resources".to_string());
-        let mut id_counter = 1u64;
-
-        let resources = store
-            .all_resources(true)
-            .filter(|resource| !resource.get_subject().contains("/commits/"));
-
-        for resource in resources {
-            // Extract title for the term
-            let title = if let Ok(name) = resource.get(crate::urls::NAME) {
-                match name {
-                    crate::Value::String(s) => s,
-                    crate::Value::Slug(s) => s,
-                    _ => continue,
-                }
-            } else if let Ok(shortname) = resource.get(crate::urls::SHORTNAME) {
-                match shortname {
-                    crate::Value::String(s) => s,
-                    crate::Value::Slug(s) => s,
-                    _ => continue,
-                }
-            } else {
-                continue;
-            };
-
-            // Create normalized term
-            let normalized_term = NormalizedTerm {
-                id: id_counter,
-                value: NormalizedTermValue::from(title.clone()),
-                url: Some(resource.get_subject().to_string()),
-            };
-
-            thesaurus.insert(NormalizedTermValue::from(title.clone()), normalized_term);
-            id_counter += 1;
-        }
-
-        // Build autocomplete index
-        let config = AutocompleteConfig {
-            max_results: 50,
-            min_prefix_length: 1,
-            case_sensitive: false,
-        };
-
-        let index = build_autocomplete_index(thesaurus, Some(config))
-            .map_err(|e| format!("Failed to build Terraphim index: {}", e))?;
-
-        // Store the index
-        {
-            let mut terraphim_idx = self.terraphim_index.write();
-            *terraphim_idx = Some(index);
-        }
-
-        tracing::info!("Terraphim autocomplete index built successfully");
-        Ok(())
-    }
-
-    /// Perform high-quality semantic fuzzy search using Terraphim automata
-    ///
-    /// This method prioritizes search quality over raw speed, using advanced
-    /// Jaro-Winkler similarity with concept mapping for superior semantic matching.
-    ///
-    /// ## Performance
-    /// - **Execution time**: ~82.4µs (517x slower than FST, but still very fast)
-    /// - **Quality**: Superior semantic understanding vs pure string matching
-    /// - **Throughput**: ~12,000 queries/second
-    /// - **Algorithm**: Jaro-Winkler with word-by-word similarity
-    ///
-    /// ## Quality Features
-    /// - **Jaro-Winkler Algorithm**: Optimized for autocomplete scenarios
-    /// - **Prefix Weighting**: Extra weight for common prefixes (better UX)
-    /// - **Word-by-Word Matching**: Handles multi-word queries intelligently
-    /// - **Concept Mapping**: Thesaurus-based semantic understanding
-    /// - **Normalized Terms**: Maps synonyms and related concepts
-    ///
-    /// ## Semantic Capabilities
-    /// - Understands concept relationships via thesaurus
-    /// - Maps normalized terms to semantic equivalents
-    /// - Handles abbreviations and synonyms
-    /// - Provides URL metadata for rich results
-    /// - Combines similarity scores with original relevance
-    ///
-    /// ## When to Use
-    /// - **Autocomplete interfaces**: Superior prefix matching
-    /// - **Knowledge bases**: Semantic concept discovery
-    /// - **Research tools**: Finding related concepts
-    /// - **Quality over speed**: When 82µs is acceptable
-    /// - **Rich metadata needed**: URLs, IDs, normalized values
-    ///
-    /// ## Performance Comparison
-    /// ```text
-    /// FST Fuzzy Search:     159ns  (speed winner)
-    /// Terraphim Fuzzy:      82µs   (quality winner)
-    /// Similarity Search:    290µs  (full scan)
-    /// ```
-    ///
-    /// ## Example
-    /// ```rust
-    /// #[cfg(feature = "terraphim-search")]
-    /// {
-    ///     // High-quality semantic search with 60% minimum similarity
-    ///     let results = search_state.terraphim_fuzzy_search("atomic", 0.6, 10)?;
-    ///     
-    ///     // Better handling of abbreviations and concepts
-    ///     let concepts = search_state.terraphim_fuzzy_search("AI", 0.7, 5)?;
-    /// }
-    /// ```
-    ///
-    /// ## Feature Flag
-    /// Requires the `terraphim-search` feature to be enabled:
-    /// ```toml
-    /// atomic_lib = { version = "0.40", features = ["terraphim-search"] }
-    /// ```
-    ///
-    /// # Arguments
-    /// * `query` - Search term for semantic matching
-    /// * `min_similarity` - Minimum Jaro-Winkler similarity (0.0-1.0, typically 0.6-0.8)
-    /// * `limit` - Maximum number of semantic matches to return
-    ///
-    /// # Returns
-    /// Vector of resource subjects with highest semantic similarity scores
-    ///
-    /// # Errors
-    /// Returns error if Terraphim index is not built or search fails
-    #[cfg(feature = "terraphim-search")]
-    pub fn terraphim_fuzzy_search(
-        &self,
-        query: &str,
-        min_similarity: f64,
-        limit: usize,
-    ) -> AtomicResult<Vec<String>> {
-        let terraphim_idx = self.terraphim_index.read();
-        let index = terraphim_idx.as_ref().ok_or("Terraphim index not built")?;
-
-        let results = fuzzy_autocomplete_search(index, query, min_similarity, Some(limit))
-            .map_err(|e| format!("Terraphim fuzzy search failed: {}", e))?;
-
-        // Extract subjects from results
-        Ok(results
-            .into_iter()
-            .filter_map(|result| result.url)
-            .collect())
-    }
-
     /// Perform lightning-fast fuzzy search using FST automata with intelligent caching
     ///
     /// This method provides typo-tolerant search using Finite State Transducers,
@@ -971,9 +787,6 @@ impl SqliteSearchState {
     /// - Real-time search suggestions
     /// - When exact match fails, fallback to fuzzy
     ///
-    /// ## Performance vs Quality Trade-off
-    /// - **For speed**: Use this method (159ns)
-    /// - **For semantic quality**: Use `terraphim_fuzzy_search` (82µs)
     ///
     /// # Arguments
     /// * `query` - Search term that may contain typos

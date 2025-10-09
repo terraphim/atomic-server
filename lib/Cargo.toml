@@ -36,8 +36,8 @@ ahash = { version = "0.8", optional = true }
 lru = { version = "0.12", optional = true }
 memmap2 = { version = "0.9", optional = true }
 dashmap = { version = "6.1", optional = true }
-terraphim_automata = { path = "../../terraphim-ai/crates/terraphim_automata", optional = true }
-terraphim_types = { path = "../../terraphim-ai/crates/terraphim_types", optional = true }
+# terraphim_automata = { git = "https://github.com/terraphim/terraphim-ai", optional = true }
+# terraphim_types = { git = "https://github.com/terraphim/terraphim-ai", optional = true }
 serde_jcs = "0.1.0"
 serde_json = "1"
 rusqlite = { version = "0.37", optional = true, features = [
@@ -69,7 +69,7 @@ tempfile = "3"
 [features]
 config = ["directories", "toml"]
 db = ["rusqlite", "r2d2", "r2d2_sqlite", "sled", "rmp-serde", "bincode1", "fst", "ahash", "lru", "memmap2", "dashmap"]
-terraphim-search = ["terraphim_automata", "terraphim_types"]
+# terraphim-search = ["terraphim_automata", "terraphim_types"]
 turso = ["libsql", "tokio", "db", "secrecy", "zeroize"]
 html = ["kuchikiki", "lol_html", "html2md"]
 rdf = ["rio_api", "rio_turtle"]

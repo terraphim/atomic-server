@@ -43,16 +43,10 @@
       "pre-commit": "pnpm run lint-fix"
     }
   },
-  "workspaces": {
-    "packages": [
-      "e2e",
-      "lib",
-      "react",
-      "data-browser",
-      "svelte",
-      "cli",
-      "create-template"
-    ]
-  },
+  "workspaces": [
+    "*/**",
+    "!create-template/templates/**",
+    "!e2e/template-tests/**"
+  ],
   "packageManager": "pnpm@10.15.1"
 }

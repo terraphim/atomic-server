@@ -14,6 +14,12 @@ NC='\033[0m' # No Color
 
 echo -e "${GREEN}Running local-only E2E tests${NC}"
 
+# Kill any orphaned processes on required ports
+echo "Cleaning up orphaned processes..."
+lsof -ti:5173 | xargs kill -9 2>/dev/null || true
+lsof -ti:9883 | xargs kill -9 2>/dev/null || true
+sleep 1
+
 # Setup test directories
 TEST_DATA_DIR="/tmp/atomic-test-data-$(date +%s)"
 TEST_CACHE_DIR="/tmp/atomic-test-cache-$(date +%s)"
