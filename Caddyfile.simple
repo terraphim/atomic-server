@@ -1,0 +1,13 @@
+{
+    email admin@privacy1st.org
+}
+
+# Main Atomic Server domain
+evolve.privacy1st.org {
+    reverse_proxy 127.0.0.1:8081
+}
+
+# WWW redirect
+www.evolve.privacy1st.org {
+    redir https://evolve.privacy1st.org{uri} permanent
+}

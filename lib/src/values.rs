@@ -1,8 +1,11 @@
 //! A value is the part of an Atom that contains the actual information.
 
 use crate::{
-    datatype::match_datatype, datatype::DataType, errors::AtomicResult, resources::PropVals,
-    utils::check_valid_url, Resource,
+    datatype::{match_datatype, DataType},
+    errors::AtomicResult,
+    resources::PropVals,
+    utils::{check_valid_uri, check_valid_url},
+    Resource,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -23,15 +26,15 @@ pub enum Value {
     /// Unix Epoch datetime in milliseconds
     Timestamp(i64),
     NestedResource(SubResource),
-    Resource(Box<Resource>),
     Boolean(bool),
+    Uri(String),
+    JSON(serde_json::Value),
     Unsupported(UnsupportedValue),
 }
 
 /// A resource in a JSON-AD body can be any of these
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubResource {
-    Resource(Box<Resource>),
     // I was considering using Resources for these, but that would involve
     // storing the paths in both the NestedResource as well as its parent
     // context, which could produce inconsistencies.
@@ -79,8 +82,9 @@ impl Value {
             Value::Timestamp(_) => DataType::Timestamp,
             // TODO: these datatypes are not the same
             Value::NestedResource(_) => DataType::AtomicUrl,
-            Value::Resource(_) => DataType::AtomicUrl,
             Value::Boolean(_) => DataType::Boolean,
+            Value::Uri(_) => DataType::Uri,
+            Value::JSON(_) => DataType::JSON,
             Value::Unsupported(s) => DataType::Unsupported(s.datatype.clone()),
         }
     }
@@ -113,6 +117,14 @@ impl Value {
             DataType::AtomicUrl => {
                 check_valid_url(value)?;
                 Ok(Value::AtomicUrl(value.into()))
+            }
+            DataType::Uri => {
+                check_valid_uri(value)?;
+                Ok(Value::Uri(value.into()))
+            }
+            DataType::JSON => {
+                let json: serde_json::Value = serde_json::from_str(value)?;
+                Ok(Value::JSON(json))
             }
             DataType::ResourceArray => {
                 let vector: Vec<String> = crate::parse::parse_json_array(value).map_err(|e| {
@@ -173,7 +185,6 @@ impl Value {
                 arr.iter()
                     .enumerate()
                     .for_each(|(i, r)| match r.to_owned() {
-                        SubResource::Resource(e) => vec.push(e.get_subject().into()),
                         SubResource::Nested(_e) => {
                             let path_base = if let Some(p) = &parent_path {
                                 p.to_string()
@@ -193,10 +204,6 @@ impl Value {
             Value::NestedResource(_nr) => {
                 // TODO: change the data model of nested resources to store the subject of the parent, so we can construct a path
                 Err("Can't convert nested resources to subjects.".into())
-            }
-            Value::Resource(r) => {
-                vec.push(r.get_subject().into());
-                Ok(vec)
             }
             other => Err(format!("Value {} is not a Resource Array, but {}", self, other).into()),
         }
@@ -243,7 +250,6 @@ impl Value {
             Value::ResourceArray(_v) => self.to_subjects(None).unwrap_or_else(|_| vec![]),
             Value::AtomicUrl(v) => vec![v.into()],
             // TODO We don't index nested resources for now
-            Value::Resource(_r) => return None,
             Value::NestedResource(_r) => return None,
             // This might result in unnecessarily long strings, sometimes. We may want to shorten them later.
             val => vec![val.to_string()],
@@ -306,7 +312,6 @@ impl From<Vec<SubResource>> for Value {
 impl From<SubResource> for Value {
     fn from(val: SubResource) -> Self {
         match val {
-            SubResource::Resource(r) => r.into(),
             SubResource::Nested(n) => n.into(),
             SubResource::Subject(s) => s.into(),
         }
@@ -331,28 +336,6 @@ impl From<f64> for Value {
     }
 }
 
-impl From<Resource> for Value {
-    fn from(val: Resource) -> Self {
-        Value::Resource(Box::new(val))
-    }
-}
-
-impl From<Box<Resource>> for Value {
-    fn from(val: Box<Resource>) -> Self {
-        Value::Resource((*val).into())
-    }
-}
-
-impl From<Vec<Resource>> for Value {
-    fn from(val: Vec<Resource>) -> Self {
-        let mut vec = Vec::new();
-        for i in val {
-            vec.push(SubResource::Resource(Box::new(i)));
-        }
-        Value::ResourceArray(vec)
-    }
-}
-
 use std::fmt;
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -373,14 +356,10 @@ impl fmt::Display for Value {
             Value::Slug(s) => write!(f, "{}", s),
             Value::String(s) => write!(f, "{}", s),
             Value::Timestamp(i) => write!(f, "{}", i),
-            Value::Resource(r) => write!(
-                f,
-                "{}",
-                r.to_json_ad()
-                    .unwrap_or_else(|_e| format!("Could not serialize resource: {:?}", r))
-            ),
             Value::NestedResource(n) => write!(f, "{:?}", n),
             Value::Boolean(b) => write!(f, "{}", b),
+            Value::Uri(s) => write!(f, "{}", s),
+            Value::JSON(s) => write!(f, "{}", s),
             Value::Unsupported(u) => write!(f, "{}", u.value),
         }
     }
@@ -391,12 +370,6 @@ impl fmt::Display for SubResource {
         let mut s: String = String::new();
 
         match self {
-            SubResource::Resource(r) => {
-                s.push_str(
-                    &r.to_json_ad()
-                        .unwrap_or_else(|_e| format!("Could not serialize resource: {:?}", r)),
-                );
-            }
             SubResource::Nested(pv) => {
                 let serialized = crate::serialize::propvals_to_json_ad_map(pv, None)
                     .unwrap_or_else(|_e| {
@@ -430,7 +403,7 @@ impl From<PropVals> for SubResource {
 
 impl From<Resource> for SubResource {
     fn from(val: Resource) -> Self {
-        SubResource::Resource(Box::new(val))
+        SubResource::Subject(val.get_subject().into())
     }
 }
 
@@ -448,6 +421,16 @@ mod test {
         assert!(date.to_string() == "1200-02-02");
         let float = Value::new("1.123123", &DataType::Float).unwrap();
         assert!(float.to_string() == "1.123123");
+        let uri = Value::new("ldap://[2001:db8::7]/c=GB?objectClass?one", &DataType::Uri).unwrap();
+        assert!(uri.to_string() == "ldap://[2001:db8::7]/c=GB?objectClass?one");
+
+        let json = Value::new("{\"foo\": \"bar\", \"baz\": 123}", &DataType::JSON).unwrap();
+        // Note: JSON serialization switches the order of the keys.
+        assert!(
+            json.to_string() == "{\"baz\":123,\"foo\":\"bar\"}"
+                || json.to_string() == "{\"foo\":\"bar\",\"baz\":123}"
+        );
+
         let converted = Value::from(8);
         assert!(converted.to_string() == "8");
     }
@@ -460,6 +443,12 @@ mod test {
         Value::new("120-02-02", &DataType::Date).unwrap_err();
         Value::new("12000-02-02", &DataType::Date).unwrap_err();
         Value::new("a", &DataType::Float).unwrap_err();
+        Value::new("blabliebla", &DataType::Uri).unwrap_err();
+        Value::new(
+            "{\"foo\": \"bar\", \"trailing comma\": 123,}",
+            &DataType::JSON,
+        )
+        .unwrap_err();
     }
 
     #[test]
@@ -514,5 +503,154 @@ mod test {
                     .into(),
             ]
         );
+    }
+
+    #[test]
+    fn test_all_datatypes_comprehensive() {
+        // Test Boolean datatype
+        let bool_true = Value::new("true", &DataType::Boolean).unwrap();
+        assert_eq!(bool_true.to_string(), "true");
+        let bool_false = Value::new("false", &DataType::Boolean).unwrap();
+        assert_eq!(bool_false.to_string(), "false");
+
+        // Boolean should fail with invalid values
+        Value::new("maybe", &DataType::Boolean).unwrap_err();
+        Value::new("1", &DataType::Boolean).unwrap_err();
+
+        // Test Date datatype (ISO 8601 format)
+        let date = Value::new("2023-12-25", &DataType::Date).unwrap();
+        assert_eq!(date.to_string(), "2023-12-25");
+
+        // Date should fail with invalid formats
+        Value::new("25-12-2023", &DataType::Date).unwrap_err();
+        Value::new("2023/12/25", &DataType::Date).unwrap_err();
+        Value::new("invalid-date", &DataType::Date).unwrap_err();
+
+        // Test Timestamp datatype (Unix timestamp in milliseconds)
+        let timestamp = Value::new("1703462400000", &DataType::Timestamp).unwrap();
+        assert_eq!(timestamp.to_string(), "1703462400000");
+
+        // Timestamp should fail with invalid formats
+        Value::new("not-a-number", &DataType::Timestamp).unwrap_err();
+        Value::new("1703462400.5", &DataType::Timestamp).unwrap_err();
+
+        // Test Slug datatype (lowercase, dashes only)
+        let slug = Value::new("my-test-slug", &DataType::Slug).unwrap();
+        assert_eq!(slug.to_string(), "my-test-slug");
+        let slug_with_numbers = Value::new("test-123-slug", &DataType::Slug).unwrap();
+        assert_eq!(slug_with_numbers.to_string(), "test-123-slug");
+
+        // Slug should fail with invalid characters
+        Value::new("My Slug", &DataType::Slug).unwrap_err(); // spaces
+        Value::new("my_slug", &DataType::Slug).unwrap_err(); // underscores
+        Value::new("my.slug", &DataType::Slug).unwrap_err(); // dots
+        Value::new("MySlug", &DataType::Slug).unwrap_err(); // uppercase
+
+        // Test AtomicUrl datatype
+        let atomic_url = Value::new("https://atomicdata.dev/test", &DataType::AtomicUrl).unwrap();
+        assert_eq!(atomic_url.to_string(), "https://atomicdata.dev/test");
+
+        // AtomicUrl should fail with invalid URLs
+        Value::new("not-a-url", &DataType::AtomicUrl).unwrap_err();
+        Value::new("invalid://not-a-url", &DataType::AtomicUrl).unwrap_err();
+
+        // Test Markdown datatype
+        let markdown =
+            Value::new("# Hello\n\nThis is **bold** text.", &DataType::Markdown).unwrap();
+        assert_eq!(markdown.to_string(), "# Hello\n\nThis is **bold** text.");
+
+        // Test ResourceArray with multiple types
+        let resource_array_json = r#"["https://example.com/first", "https://example.com/second"]"#;
+        let resource_array = Value::new(resource_array_json, &DataType::ResourceArray).unwrap();
+        match resource_array {
+            Value::ResourceArray(resources) => {
+                assert_eq!(resources.len(), 2);
+            }
+            _ => panic!("Expected ResourceArray value"),
+        }
+
+        // Test complex JSON
+        let complex_json = r#"{"nested": {"array": [1, 2, 3]}, "string": "value", "number": 42.5}"#;
+        let json_value = Value::new(complex_json, &DataType::JSON).unwrap();
+        // JSON parsing should succeed, order may vary
+        assert!(json_value.to_string().contains("nested"));
+        assert!(json_value.to_string().contains("array"));
+
+        // Test edge cases for numeric types
+        let max_int = Value::new("9223372036854775807", &DataType::Integer).unwrap(); // i64::MAX
+        assert_eq!(max_int.to_string(), "9223372036854775807");
+
+        let min_int = Value::new("-9223372036854775808", &DataType::Integer).unwrap(); // i64::MIN
+        assert_eq!(min_int.to_string(), "-9223372036854775808");
+
+        let scientific_float = Value::new("1.23e-4", &DataType::Float).unwrap();
+        assert_eq!(scientific_float.to_string(), "0.000123"); // Scientific notation gets converted to decimal
+
+        let negative_float = Value::new("-123.456", &DataType::Float).unwrap();
+        assert_eq!(negative_float.to_string(), "-123.456");
+    }
+
+    #[test]
+    fn test_datatype_conversions() {
+        // Test From trait implementations
+        let from_bool = Value::from(true);
+        assert_eq!(from_bool.datatype(), DataType::Boolean);
+        assert_eq!(from_bool.to_string(), "true");
+
+        let from_i32 = Value::from(42i32);
+        assert_eq!(from_i32.datatype(), DataType::Integer);
+        assert_eq!(from_i32.to_string(), "42");
+
+        // Note: i64 doesn't have From implementation, only i32 does
+        let large_int = Value::Integer(1234567890123456789i64);
+        assert_eq!(large_int.datatype(), DataType::Integer);
+        assert_eq!(large_int.to_string(), "1234567890123456789");
+
+        let from_f64 = Value::from(std::f64::consts::PI);
+        assert_eq!(from_f64.datatype(), DataType::Float);
+        assert!(from_f64.to_string().starts_with("3.141"));
+
+        let from_string = Value::from("test string".to_string());
+        assert_eq!(from_string.datatype(), DataType::String);
+        assert_eq!(from_string.to_string(), "test string");
+
+        // Test URL vector conversion
+        let urls = vec!["https://example.com/1", "https://example.com/2"];
+        let from_urls = Value::from(urls);
+        assert_eq!(from_urls.datatype(), DataType::ResourceArray);
+    }
+
+    #[test]
+    fn test_value_serialization_edge_cases() {
+        // Test empty values
+        let empty_string = Value::new("", &DataType::String).unwrap();
+        assert_eq!(empty_string.to_string(), "");
+
+        let empty_json = Value::new("{}", &DataType::JSON).unwrap();
+        assert_eq!(empty_json.to_string(), "{}");
+
+        let empty_array = Value::new("[]", &DataType::ResourceArray).unwrap();
+        match empty_array {
+            Value::ResourceArray(resources) => {
+                assert_eq!(resources.len(), 0);
+            }
+            _ => panic!("Expected ResourceArray value"),
+        }
+
+        // Test whitespace handling
+        let string_with_whitespace = Value::new("  spaced  ", &DataType::String).unwrap();
+        assert_eq!(string_with_whitespace.to_string(), "  spaced  ");
+
+        let markdown_with_whitespace =
+            Value::new("\n\n  # Title  \n\n", &DataType::Markdown).unwrap();
+        assert_eq!(markdown_with_whitespace.to_string(), "\n\n  # Title  \n\n");
+
+        // Test unicode handling
+        let unicode_string = Value::new("🚀 Hello 世界! émojis", &DataType::String).unwrap();
+        assert_eq!(unicode_string.to_string(), "🚀 Hello 世界! émojis");
+
+        let unicode_markdown =
+            Value::new("# 标题\n\n**粗体** _斜体_", &DataType::Markdown).unwrap();
+        assert_eq!(unicode_markdown.to_string(), "# 标题\n\n**粗体** _斜体_");
     }
 }

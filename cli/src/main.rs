@@ -1,15 +1,18 @@
+use atomic_lib::agents::Agent;
+use atomic_lib::config::Config;
+use atomic_lib::config::{ClientConfig, SharedConfig};
+use atomic_lib::mapping::Mapping;
 use atomic_lib::serialize::Format;
-use atomic_lib::{agents::generate_public_key, mapping::Mapping};
-use atomic_lib::{agents::Agent, config::Config};
 use atomic_lib::{errors::AtomicResult, Storelike};
 use clap::{crate_version, Parser, Subcommand, ValueEnum};
 use colored::*;
 use dirs::home_dir;
-use std::{cell::RefCell, path::PathBuf, sync::Mutex};
+use parking_lot::Mutex;
+use std::{cell::RefCell, path::PathBuf};
 
 mod commit;
+mod get;
 mod new;
-mod path;
 mod print;
 mod search;
 
@@ -45,9 +48,9 @@ enum Commands {
         Visit https://docs.atomicdata.dev/core/paths.html for more info about paths. \
     ")]
     Get {
-        /// The subject URL, shortname or path to be fetched
-        #[arg(required = true, num_args = 1..)]
-        path: Vec<String>,
+        /// The subject URL
+        #[arg(required = true)]
+        subject: String,
 
         /// Serialization format
         #[arg(long, value_enum, default_value = "pretty")]
@@ -98,26 +101,41 @@ enum Commands {
         /// The search query
         #[arg(required = true)]
         query: String,
+        /// Subject URL of the parent Resource to filter by
+        #[arg(long)]
+        parent: Option<String>,
+        /// Server URL to search on
+        /// Will query this + `/search` if provided.
+        /// Defaults to the server in the config.
+        #[arg(long)]
+        server: Option<String>,
+        /// Serialization format
+        #[arg(long, value_enum, default_value = "pretty")]
+        as_: SerializeOptions,
     },
     /// List all bookmarks
     List,
     /// Validates the store
     #[command(hide = true)]
     Validate,
+    /// Print the current agent
+    Agent,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
 pub enum SerializeOptions {
     Pretty,
     Json,
+    JsonAd,
     NTriples,
 }
 
-impl Into<Format> for SerializeOptions {
-    fn into(self) -> Format {
-        match self {
+impl From<SerializeOptions> for Format {
+    fn from(val: SerializeOptions) -> Self {
+        match val {
             SerializeOptions::Pretty => Format::Pretty,
             SerializeOptions::Json => Format::Json,
+            SerializeOptions::JsonAd => Format::JsonAd,
             SerializeOptions::NTriples => Format::NTriples,
         }
     }
@@ -144,13 +162,11 @@ impl Context {
         let write_ctx =
             set_agent_config().expect("Issue while generating write context / agent configuration");
         self.write.borrow_mut().replace(write_ctx.clone());
-        self.store.set_default_agent(Agent {
-            subject: write_ctx.agent.clone(),
-            private_key: Some(write_ctx.private_key.clone()),
-            created_at: atomic_lib::utils::now(),
-            name: None,
-            public_key: generate_public_key(&write_ctx.private_key).public,
-        });
+        let agent = Agent::from_secret(&write_ctx.shared.agent_secret).unwrap();
+        self.store.set_default_agent(agent);
+        self.store
+            .set_server_url(&write_ctx.client.clone().unwrap().server_url);
+
         write_ctx
     }
 }
@@ -159,25 +175,43 @@ impl Context {
 fn set_agent_config() -> CLIResult<Config> {
     let agent_config_path = atomic_lib::config::default_config_file_path()?;
     match atomic_lib::config::read_config(Some(&agent_config_path)) {
-        Ok(found) => Ok(found),
+        Ok(found) => {
+            prompt_for_missing_config_values(&found)?;
+            Ok(found)
+        }
         Err(_e) => {
             println!(
                 "No config found at {:?}. Let's create one!",
                 &agent_config_path
             );
             let server = promptly::prompt("What's the base url of your Atomic Server?")?;
-            let agent = promptly::prompt("What's the URL of your Agent?")?;
-            let private_key = promptly::prompt("What's the private key of this Agent?")?;
+            let agent_secret = promptly::prompt("Enter your agent secret")?;
             let config = atomic_lib::config::Config {
-                server,
-                agent,
-                private_key,
+                shared: SharedConfig { agent_secret },
+                client: Some(ClientConfig { server_url: server }),
             };
-            atomic_lib::config::write_config(&agent_config_path, config.clone())?;
+            config.save(&agent_config_path)?;
             println!("New config file created at {:?}", agent_config_path);
             Ok(config)
         }
     }
+}
+
+fn prompt_for_missing_config_values(config: &Config) -> AtomicResult<Config> {
+    if config.client.is_none() {
+        println!("No server url found in config.");
+        let server = promptly::prompt("What's the base url of your Atomic Server?")
+            .map_err(|e| format!("Invalid input: {}", e))?;
+        let config = Config {
+            client: Some(ClientConfig { server_url: server }),
+            ..config.clone()
+        };
+        config.save(&atomic_lib::config::default_config_file_path()?)?;
+
+        return Ok(config);
+    }
+
+    Ok(config.clone())
 }
 
 fn main() -> AtomicResult<()> {
@@ -238,8 +272,8 @@ fn exec_command(context: &mut Context) -> AtomicResult<()> {
                 return Err("Feature not available. Compile with `native` feature.".into());
             }
         }
-        Commands::Get { path, as_ } => {
-            path::get_path(context, &path, &as_)?;
+        Commands::Get { subject, as_ } => {
+            get::get_resource(context, &subject, &as_)?;
         }
         Commands::List => {
             list(context);
@@ -257,11 +291,21 @@ fn exec_command(context: &mut Context) -> AtomicResult<()> {
         } => {
             commit::set(context, &subject, &property, &value)?;
         }
-        Commands::Search { query } => {
-            search::search(context, query)?;
+        Commands::Search {
+            query,
+            parent,
+            server,
+            as_,
+        } => {
+            search::search(context, query, parent, server, &as_)?;
         }
         Commands::Validate => {
             validate(context);
+        }
+        Commands::Agent => {
+            let config = context.read_config();
+            let agent = Agent::from_secret(&config.shared.agent_secret).unwrap();
+            println!("{}", agent.subject);
         }
     };
     Ok(())
@@ -270,7 +314,7 @@ fn exec_command(context: &mut Context) -> AtomicResult<()> {
 /// List all bookmarks
 fn list(context: &mut Context) {
     let mut string = String::new();
-    for (shortname, url) in context.mapping.lock().unwrap().clone().into_iter() {
+    for (shortname, url) in context.mapping.lock().clone().into_iter() {
         string.push_str(&format!(
             "{0: <15}{1: <10} \n",
             shortname.blue().bold(),

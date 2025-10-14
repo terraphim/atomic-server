@@ -2,10 +2,12 @@ use crate::{appstate::AppState, errors::AtomicServerResult, helpers::get_client_
 use actix_files::NamedFile;
 use actix_web::{web, HttpRequest, HttpResponse};
 use atomic_lib::{urls, Resource, Storelike};
-use image::GenericImageView;
-use image::{codecs::avif::AvifEncoder, ImageReader};
+
 use serde::Deserialize;
-use std::{collections::HashSet, io::Write, path::PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 #[serde_with::serde_as]
 #[serde_with::skip_serializing_none]
@@ -39,7 +41,11 @@ pub async fn handle_download(
 
     let for_agent = get_client_agent(headers, &appstate, subject.clone())?;
     tracing::info!("handle_download: {}", subject);
-    let resource = store.get_resource_extended(&subject, false, &for_agent)?;
+
+    let resource = store
+        .get_resource_extended(&subject, false, &for_agent)?
+        .to_single();
+
     download_file_handler_partial(&resource, &req, &params, &appstate)
 }
 
@@ -53,8 +59,15 @@ pub fn download_file_handler_partial(
         .get(urls::INTERNAL_ID)
         .map_err(|e| format!("Internal ID of file could not be resolved. {}", e))?
         .to_string();
+
+    // Validate filename to prevent path traversal attacks
+    validate_filename(&filename)?;
+
     let mut file_path = appstate.config.uploads_path.clone();
     file_path.push(&filename);
+
+    // Ensure the final path is still within the uploads directory
+    validate_file_path(&file_path, &appstate.config.uploads_path)?;
 
     // No params were given, so we just return the file.
     if params.q.is_none() && params.w.is_none() && params.f.is_none() {
@@ -71,11 +84,16 @@ pub fn download_file_handler_partial(
         return Ok(file.into_response(req));
     }
 
-    if !is_image(&file_path) {
-        return Err("Quality or with parameter are not supported for non image files".into());
+    // only if image feature flag is on
+    #[cfg(feature = "image")]
+    {
+        use crate::handlers::image::{is_image, process_image};
+        if !is_image(&file_path) {
+            return Err("Quality or with parameter are not supported for non image files".into());
+        }
+        let format = get_format(params)?;
+        process_image(&file_path, &processed_file_path, params, &format)?;
     }
-
-    process_image(&file_path, &processed_file_path, params)?;
 
     let file = NamedFile::open(processed_file_path)?;
     Ok(file.into_response(req))
@@ -86,6 +104,9 @@ pub fn build_prossesed_file_path(
     params: &DownloadParams,
     base_path: PathBuf,
 ) -> AtomicServerResult<PathBuf> {
+    // Validate filename first
+    validate_filename(filename)?;
+
     let format = get_format(params)?;
 
     let Some((timestamp, rest)) = filename.split_once('-') else {
@@ -110,59 +131,8 @@ pub fn build_prossesed_file_path(
     Ok(processed_file_path)
 }
 
-fn is_image(file_path: &PathBuf) -> bool {
-    if let Ok(img) = image::open(file_path) {
-        return img.dimensions() > (0, 0);
-    }
-    false
-}
-
-fn process_image(
-    file_path: &PathBuf,
-    new_path: &PathBuf,
-    params: &DownloadParams,
-) -> AtomicServerResult<()> {
-    let format = get_format(params)?;
-    let quality = params.q.unwrap_or(100.0).clamp(0.0, 100.0);
-
-    let mut img = ImageReader::open(file_path)?
-        .with_guessed_format()?
-        .decode()
-        .map_err(|e| format!("Failed to decode image: {}", e))?;
-
-    if let Some(width) = &params.w {
-        if *width < img.dimensions().0 {
-            img = img.resize(*width, 10000, image::imageops::FilterType::Lanczos3);
-        }
-    }
-
-    if format == "webp" {
-        let encoder = webp::Encoder::from_image(&img)?;
-        let webp_image = match params.q {
-            Some(quality) => encoder.encode(quality),
-            None => encoder.encode(75.0),
-        };
-
-        let mut file = std::fs::File::create(new_path)?;
-        file.write_all(&webp_image)?;
-
-        return Ok(());
-    }
-
-    if format == "avif" {
-        let mut file = std::fs::File::create(new_path)?;
-        let encoder = AvifEncoder::new_with_speed_quality(&mut file, 8, quality as u8);
-        img.write_with_encoder(encoder)
-            .map_err(|e| format!("Failed to encode image: {}", e))?;
-
-        return Ok(());
-    }
-
-    Err(format!("Unsupported format: {}", format).into())
-}
-
-fn create_processed_folder_if_not_exists(base_path: &PathBuf) -> AtomicServerResult<()> {
-    let mut processed_folder = base_path.clone();
+fn create_processed_folder_if_not_exists(base_path: &Path) -> AtomicServerResult<()> {
+    let mut processed_folder = base_path.to_path_buf();
     processed_folder.push("processed");
     std::fs::create_dir_all(processed_folder)?;
     Ok(())
@@ -178,4 +148,68 @@ fn get_format(params: &DownloadParams) -> AtomicServerResult<String> {
     }
 
     Ok(format)
+}
+
+/// Validate filename to prevent path traversal attacks
+fn validate_filename(filename: &str) -> AtomicServerResult<()> {
+    // Check for empty filename
+    if filename.is_empty() {
+        return Err("Filename cannot be empty".into());
+    }
+
+    // Check for path traversal attempts
+    if filename.contains("..") || filename.contains('/') || filename.contains('\\') {
+        return Err("Invalid filename: path traversal detected".into());
+    }
+
+    // Check for null bytes
+    if filename.contains('\0') {
+        return Err("Invalid filename: null byte detected".into());
+    }
+
+    // Check for control characters
+    if filename.chars().any(|c| c.is_control()) {
+        return Err("Invalid filename: control characters not allowed".into());
+    }
+
+    // Check length
+    if filename.len() > 255 {
+        return Err("Filename too long (max 255 characters)".into());
+    }
+
+    // Check for reserved names on Windows (even on Linux for consistency)
+    let forbidden_names = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+
+    let name_without_ext = filename
+        .split('.')
+        .next()
+        .unwrap_or(filename)
+        .to_uppercase();
+    if forbidden_names.contains(&name_without_ext.as_str()) {
+        return Err("Invalid filename: reserved name".into());
+    }
+
+    Ok(())
+}
+
+/// Validate that the file path is within the allowed directory
+fn validate_file_path(file_path: &Path, base_path: &Path) -> AtomicServerResult<()> {
+    // Canonicalize both paths to resolve any symlinks or relative components
+    let canonical_file_path = file_path
+        .canonicalize()
+        .map_err(|_| "File path could not be resolved")?;
+
+    let canonical_base_path = base_path
+        .canonicalize()
+        .map_err(|_| "Base path could not be resolved")?;
+
+    // Check if the file path starts with the base path
+    if !canonical_file_path.starts_with(&canonical_base_path) {
+        return Err("Access denied: file is outside allowed directory".into());
+    }
+
+    Ok(())
 }

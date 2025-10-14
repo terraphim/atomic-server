@@ -28,6 +28,8 @@ See the [Atomic Data Docs](https://docs.atomicdata.dev) for more information.
 use atomic_lib::Storelike;
 // Start with initializing the in-memory store
 let store = atomic_lib::Store::init().unwrap();
+// Set a server URL for this store
+store.set_server_url("http://localhost");
 // Pre-load the default Atomic Data Atoms (from atomicdata.dev),
 // this is not necessary, but will probably make your project a bit faster
 store.populate().unwrap();
@@ -61,6 +63,8 @@ assert!(fetched_new_resource.get_shortname("description", &store).unwrap().to_st
 pub mod agents;
 pub mod atoms;
 pub mod authentication;
+#[cfg(feature = "db")]
+pub mod class_extender;
 pub mod client;
 pub mod collections;
 pub mod commit;
@@ -80,9 +84,12 @@ pub mod plugins;
 pub mod populate;
 pub mod resources;
 pub mod schema;
+pub mod search_sqlite;
 pub mod serialize;
+pub mod similarity;
 pub mod store;
 pub mod storelike;
+pub mod stores;
 #[cfg(test)]
 mod test_utils;
 pub mod urls;
@@ -99,4 +106,6 @@ pub use errors::AtomicErrorType;
 pub use resources::Resource;
 pub use store::Store;
 pub use storelike::Storelike;
+#[cfg(feature = "turso")]
+pub use stores::turso::{TursoConfig, TursoStore};
 pub use values::Value;

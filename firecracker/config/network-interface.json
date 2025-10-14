@@ -1,0 +1,5 @@
+{
+  "iface_id": "eth0",
+  "guest_mac": "__GUEST_MAC__",
+  "host_dev_name": "__TAP_DEV__"
+}

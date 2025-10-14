@@ -13,8 +13,9 @@ use atomic_lib::{
     agents::ForAgent,
     authentication::{get_agent_from_auth_values_and_check, AuthValues},
     errors::AtomicResult,
-    Db, Storelike,
+    Storelike,
 };
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::{
@@ -64,7 +65,9 @@ pub struct WebSocketConnection {
     /// The Agent who is connected.
     /// If it's not specified, it's the Public Agent.
     agent: ForAgent,
-    store: Db,
+    store: atomic_lib::Db,
+    /// Rate limiting for authentication attempts
+    auth_attempts: HashMap<String, (Instant, u32)>,
 }
 
 impl Actor for WebSocketConnection {
@@ -104,10 +107,31 @@ fn handle_ws_message(
         Ok(ws::Message::Text(bytes)) => {
             let text = bytes.to_string();
             tracing::debug!("Incoming websocket text message: {:?}", text);
+
+            // Validate message length to prevent abuse
+            if text.len() > 10000 {
+                return Err("Message too long (max 10000 characters)".into());
+            }
+
+            // Rate limiting check
+            if !conn.check_rate_limit() {
+                return Err("Rate limit exceeded".into());
+            }
+
             match text.as_str() {
                 s if s.starts_with("SUBSCRIBE ") => {
                     let mut parts = s.split("SUBSCRIBE ");
                     if let Some(subject) = parts.nth(1) {
+                        // Validate subject format
+                        if !is_valid_websocket_subject(subject) {
+                            return Err("Invalid subject format".into());
+                        }
+
+                        // Limit number of subscriptions per connection
+                        if conn.subscribed.len() >= 100 {
+                            return Err("Too many subscriptions (max 100)".into());
+                        }
+
                         conn.commit_monitor_addr
                             .do_send(crate::actor_messages::Subscribe {
                                 addr: ctx.address(),
@@ -132,6 +156,11 @@ fn handle_ws_message(
                 s if s.starts_with("GET ") => {
                     let mut parts = s.split("GET ");
                     if let Some(subject) = parts.nth(1) {
+                        // Validate subject format
+                        if !is_valid_websocket_subject(subject) {
+                            return Err("Invalid subject format".into());
+                        }
+
                         match conn
                             .store
                             .get_resource_extended(subject, false, &conn.agent)
@@ -139,6 +168,11 @@ fn handle_ws_message(
                             Ok(r) => {
                                 let serialized =
                                     r.to_json_ad().expect("Can't serialize Resource to JSON-AD");
+                                // Limit response size to prevent memory issues
+                                if serialized.len() > 1_000_000 {
+                                    // 1MB limit
+                                    return Err("Resource too large to send over WebSocket".into());
+                                }
                                 ctx.text(format!("RESOURCE {serialized}"));
                                 Ok(())
                             }
@@ -165,7 +199,6 @@ fn handle_ws_message(
                         };
                         match get_agent_from_auth_values_and_check(
                             Some(auth_header_values),
-                            // How will we get a Store here?
                             &conn.store,
                         ) {
                             Ok(a) => {
@@ -199,15 +232,11 @@ fn handle_ws_message(
 }
 
 impl WebSocketConnection {
-    fn new(commit_monitor_addr: Addr<CommitMonitor>, agent: ForAgent, store: Db) -> Self {
-        let size = std::mem::size_of::<Db>();
-        if size > 10000 {
-            tracing::warn!(
-                "Cloned Store is over 10kB, this will hurt performance: {:?} bytes",
-                size
-            );
-        }
-
+    fn new(
+        commit_monitor_addr: Addr<CommitMonitor>,
+        agent: ForAgent,
+        store: atomic_lib::Db,
+    ) -> Self {
         Self {
             hb: Instant::now(),
             // Maybe this should be stored only in the CommitMonitor, and not here.
@@ -215,6 +244,7 @@ impl WebSocketConnection {
             commit_monitor_addr,
             agent,
             store,
+            auth_attempts: HashMap::new(),
         }
     }
 
@@ -238,6 +268,61 @@ impl WebSocketConnection {
             ctx.ping(b"");
         });
     }
+
+    /// Check rate limiting for WebSocket messages
+    fn check_rate_limit(&mut self) -> bool {
+        let now = Instant::now();
+        let agent_key = self.agent.to_string();
+
+        // Clean old entries
+        self.auth_attempts
+            .retain(|_, (time, _)| now.duration_since(*time) < Duration::from_secs(60));
+
+        // Check current rate
+        let (last_time, count) = self
+            .auth_attempts
+            .entry(agent_key.clone())
+            .or_insert((now, 0));
+
+        if now.duration_since(*last_time) < Duration::from_secs(1) {
+            *count += 1;
+            if *count > 100 {
+                // Max 100 messages per second (was 10)
+                return false;
+            }
+        } else {
+            *last_time = now;
+            *count = 1;
+        }
+
+        true
+    }
+}
+
+/// Validate WebSocket subject format
+fn is_valid_websocket_subject(subject: &str) -> bool {
+    // Basic validation for WebSocket subjects
+    if subject.is_empty() || subject.len() > 2048 {
+        return false;
+    }
+
+    // Ensure it's a valid URL or resource identifier
+    if !(subject.starts_with("http://")
+        || subject.starts_with("https://")
+        || subject.starts_with("atomic://")
+        || subject.starts_with("/"))
+    {
+        return false;
+    }
+
+    // Check for dangerous characters
+    subject.chars().all(|c| {
+        c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                ':' | '/' | '-' | '_' | '.' | '#' | '?' | '=' | '&' | '%' | '@' | '+'
+            )
+    })
 }
 
 impl Handler<CommitMessage> for WebSocketConnection {

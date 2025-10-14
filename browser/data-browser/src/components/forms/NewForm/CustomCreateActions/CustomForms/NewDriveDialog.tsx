@@ -8,6 +8,7 @@ import {
   Dialog,
   DialogContent,
   DialogActions,
+  DialogTitle,
 } from '../../../../Dialog';
 import Field from '../../../Field';
 import { InputWrapper, InputStyled } from '../../../InputStyles';
@@ -15,10 +16,7 @@ import { CustomResourceDialogProps } from '../../useNewResourceUI';
 import { useCreateAndNavigate } from '../../../../../hooks/useCreateAndNavigate';
 import { useSettings } from '../../../../../helpers/AppSettings';
 
-export const NewDriveDialog: FC<CustomResourceDialogProps> = ({
-  parent,
-  onClose,
-}) => {
+export const NewDriveDialog: FC<CustomResourceDialogProps> = ({ onClose }) => {
   const store = useStore();
   const nameFieldId = useId();
   const { setDrive } = useSettings();
@@ -37,7 +35,7 @@ export const NewDriveDialog: FC<CustomResourceDialogProps> = ({
       );
     }
 
-    const newDrive = await createAndNavigate(
+    await createAndNavigate(
       server.classes.drive,
       {
         [core.properties.name]: name,
@@ -53,12 +51,9 @@ export const NewDriveDialog: FC<CustomResourceDialogProps> = ({
           await agentResource.save();
 
           // Create a default ontology.
-          const ontologyName = stringToSlug(name);
+          const ontologyName = stringToSlug(name.trim());
           const ontology = await store.newResource({
-            subject: await store.buildUniqueSubjectFromParts(
-              ['defaultOntology'],
-              resource.subject,
-            ),
+            subject: `${resource.subject}/defaultOntology`,
             isA: core.classes.ontology,
             parent: resource.subject,
             propVals: {
@@ -81,15 +76,15 @@ export const NewDriveDialog: FC<CustomResourceDialogProps> = ({
             ontology.subject,
           ]);
           await resource.save();
+
+          // Change current drive to new drive - do this before navigation
+          setDrive(resource.subject);
         },
       },
     );
 
-    // Change current drive to new drive
-    setDrive(newDrive.subject);
-
     onClose();
-  }, [name, createAndNavigate, onClose, parent, setDrive, store]);
+  }, [name, createAndNavigate, onClose, setDrive, store]);
 
   const [dialogProps, show, hide] = useDialog({ onSuccess, onCancel: onClose });
 
@@ -99,7 +94,9 @@ export const NewDriveDialog: FC<CustomResourceDialogProps> = ({
 
   return (
     <Dialog {...dialogProps}>
-      <H1>New Drive</H1>
+      <DialogTitle>
+        <H1>New Drive</H1>
+      </DialogTitle>
       <DialogContent>
         <form
           onSubmit={(e: FormEvent) => {

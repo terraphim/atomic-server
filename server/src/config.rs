@@ -74,6 +74,10 @@ pub struct Opts {
     #[clap(long, env = "ATOMIC_DATA_DIR")]
     pub data_dir: Option<PathBuf>,
 
+    /// Path for the atomic data cache folder. Contains search index, temp files and more. Default value depends on your OS.
+    #[clap(long, env = "ATOMIC_CACHE_DIR")]
+    pub cache_dir: Option<PathBuf>,
+
     /// CAUTION: Skip authentication checks, making all data publicly readable. Improves performance.
     #[clap(long, env = "ATOMIC_PUBLIC_MODE")]
     pub public_mode: bool,
@@ -94,6 +98,32 @@ pub struct Opts {
     /// Introduces random delays in the server, to simulate a slow connection. Useful for testing.
     #[clap(long, env = "ATOMIC_SLOW_MODE")]
     pub slow_mode: bool,
+
+    // === TURSO CONFIGURATION ===
+    /// Use Turso (libSQL) as the database backend instead of SQLite
+    #[cfg(feature = "turso")]
+    #[clap(long, env = "ATOMIC_TURSO_ENABLE")]
+    pub turso_enable: bool,
+
+    /// Turso database URL (e.g., "libsql://your-db.turso.io")
+    #[cfg(feature = "turso")]
+    #[clap(long, env = "ATOMIC_TURSO_URL")]
+    pub turso_url: Option<String>,
+
+    /// Turso authentication token
+    #[cfg(feature = "turso")]
+    #[clap(long, env = "ATOMIC_TURSO_AUTH_TOKEN")]
+    pub turso_auth_token: Option<String>,
+
+    /// Path for embedded replica database (for better performance)
+    #[cfg(feature = "turso")]
+    #[clap(long, env = "ATOMIC_TURSO_REPLICA_PATH")]
+    pub turso_replica_path: Option<String>,
+
+    /// Sync interval in seconds for embedded replica (default: 60)
+    #[cfg(feature = "turso")]
+    #[clap(long, default_value = "60", env = "ATOMIC_TURSO_SYNC_INTERVAL")]
+    pub turso_sync_interval: u64,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -192,6 +222,9 @@ pub struct Config {
     pub search_index_path: PathBuf,
     /// If true, the initialization scripts will be ran (create first Drive, Agent, indexing, etc)
     pub initialize: bool,
+    /// Turso configuration (if enabled)
+    #[cfg(feature = "turso")]
+    pub turso_config: Option<atomic_lib::TursoConfig>,
 }
 
 /// Parse .env and CLI options
@@ -201,6 +234,21 @@ pub fn read_opts() -> Opts {
 
     // Parse CLI options, .env values, set defaults
     Opts::parse()
+}
+
+pub fn build_temp_config(random_id: &str) -> AtomicServerResult<Config> {
+    let opts = Opts::parse_from([
+        "atomic-server",
+        "--initialize",
+        "--data-dir",
+        &format!("./.temp/{}/db", random_id),
+        "--config-dir",
+        &format!("./.temp/{}/config", random_id),
+        "--cache-dir",
+        &format!("./.temp/{}/cache", random_id),
+    ]);
+
+    build_config(opts)
 }
 
 /// Creates the server config, reads .env values and sets defaults
@@ -242,12 +290,44 @@ pub fn build_config(opts: Opts) -> AtomicServerResult<Config> {
 
     // Cache data
 
-    let cache_dir = project_dirs.cache_dir();
+    let cache_dir = opts
+        .cache_dir
+        .clone()
+        .unwrap_or_else(|| project_dirs.cache_dir().to_owned());
 
-    let mut search_index_path = cache_dir.to_owned();
+    let mut search_index_path = cache_dir;
     search_index_path.push("search_index");
 
     let initialize = !std::path::Path::exists(&store_path) || opts.initialize;
+
+    // Build Turso configuration if enabled
+    #[cfg(feature = "turso")]
+    let turso_config = if opts.turso_enable {
+        let url = opts
+            .turso_url
+            .clone()
+            .ok_or("ATOMIC_TURSO_URL is required when Turso is enabled")?;
+        let auth_token = opts
+            .turso_auth_token
+            .clone()
+            .ok_or("ATOMIC_TURSO_AUTH_TOKEN is required when Turso is enabled")?;
+
+        Some(atomic_lib::TursoConfig::new(
+            url,
+            auth_token,
+            opts.turso_replica_path.clone().or_else(|| {
+                Some(
+                    store_path
+                        .join("turso_replica.db")
+                        .to_string_lossy()
+                        .to_string(),
+                )
+            }),
+            Some(opts.turso_sync_interval),
+        ))
+    } else {
+        None
+    };
 
     if opts.https & opts.email.is_none() {
         return Err(
@@ -280,5 +360,7 @@ pub fn build_config(opts: Opts) -> AtomicServerResult<Config> {
         store_path,
         search_index_path,
         uploads_path,
+        #[cfg(feature = "turso")]
+        turso_config,
     })
 }

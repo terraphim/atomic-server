@@ -11,13 +11,13 @@ pub async fn single_page(
     path: actix_web::web::Path<String>,
 ) -> AtomicServerResult<HttpResponse> {
     let template = include_str!("../../assets_tmp/index.html");
-    let subject = format!("{}/{}", appstate.store.get_server_url(), path);
-    let meta_tags: MetaTags = if let Ok(resource) =
+    let subject = format!("{}/{}", appstate.store.get_server_url()?, path);
+    let meta_tags: MetaTags = if let Ok(resource_response) =
         appstate
             .store
             .get_resource_extended(&subject, true, &ForAgent::Public)
     {
-        resource.into()
+        resource_response.into()
     } else {
         MetaTags::default()
     };
@@ -41,6 +41,7 @@ pub async fn single_page(
 }
 
 use atomic_lib::agents::ForAgent;
+use atomic_lib::storelike::ResourceResponse;
 use atomic_lib::urls;
 use atomic_lib::Resource;
 use atomic_lib::Storelike;
@@ -51,6 +52,23 @@ struct MetaTags {
     title: String,
     image: String,
     json: Option<String>,
+}
+
+impl From<ResourceResponse> for MetaTags {
+    fn from(rr: ResourceResponse) -> Self {
+        match rr {
+            ResourceResponse::Resource(r) => r.into(),
+            ResourceResponse::ResourceWithReferenced(ref resource, _) => {
+                let mut tags: MetaTags = resource.clone().into();
+
+                let json = rr.to_json_ad().ok();
+
+                tags.json = json;
+
+                tags
+            }
+        }
+    }
 }
 
 impl From<Resource> for MetaTags {
@@ -71,12 +89,7 @@ impl From<Resource> for MetaTags {
         } else {
             "/default_social_preview.jpg".to_string()
         };
-        let json = if let Ok(serialized) = r.to_json_ad() {
-            // TODO: also fetch the parents for extra fast first renders.
-            Some(serialized)
-        } else {
-            None
-        };
+        let json = r.to_json_ad().ok();
         Self {
             description,
             title,

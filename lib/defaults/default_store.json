@@ -208,17 +208,6 @@
         "https://atomicdata.dev/properties/shortname": "edit"
     },
     {
-        "@id": "https://atomicdata.dev/properties/read",
-        "https://atomicdata.dev/properties/classtype": "https://atomicdata.dev/classes/Agent",
-        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/atomicURL",
-        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/properties",
-        "https://atomicdata.dev/properties/description": "The Agents (users) who are allowed to read this Resource and all children (those that have the current Resource as their parent).",
-        "https://atomicdata.dev/properties/isA": [
-            "https://atomicdata.dev/classes/Property"
-        ],
-        "https://atomicdata.dev/properties/shortname": "read"
-    },
-    {
         "@id": "https://atomicdata.dev/properties/checksum",
         "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/string",
         "https://atomicdata.dev/properties/description": "Base64 encoded SHA-256 checksum of a binary object.",
@@ -710,7 +699,7 @@
     },
     {
         "@id": "https://atomicdata.dev/properties/published-at",
-        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/timestamp",
+        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/date",
         "https://atomicdata.dev/properties/description": "DateTime at which an item is made public.",
         "https://atomicdata.dev/properties/isA": [
             "https://atomicdata.dev/classes/Property"
@@ -1125,6 +1114,10 @@
         "https://atomicdata.dev/properties/shortname": "timestamp"
     },
     {
+        "@id": "https://atomicdata.dev/agents",
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev"
+    },
+    {
         "@id": "https://atomicdata.dev/agents/publicAgent",
         "https://atomicdata.dev/properties/description": "This abstract Agent represents all potential users or visitors. If you want a Resource to be publicly available or editable, use this in your [read](https://atomicdata.dev/properties/read) or [write](https://atomicdata.dev/properties/read) property.",
         "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/agents",
@@ -1138,6 +1131,15 @@
         ],
         "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/datatypes",
         "https://atomicdata.dev/properties/shortname": "uri"
+    },
+    {
+        "@id": "https://atomicdata.dev/datatypes/json",
+        "https://atomicdata.dev/properties/description": "An untyped JSON object.",
+        "https://atomicdata.dev/properties/isA": [
+            "https://atomicdata.dev/classes/Datatype"
+        ],
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/datatypes",
+        "https://atomicdata.dev/properties/shortname": "json"
     },
     {
         "@id": "https://atomicdata.dev/classes/Folder",
@@ -1172,5 +1174,56 @@
             "https://atomicdata.dev/property/url"
         ],
         "https://atomicdata.dev/properties/shortname": "bookmark"
+    },
+    {
+        "@id": "https://atomicdata.dev/ontology/data-browser/property/tag-list",
+        "https://atomicdata.dev/properties/classtype": "https://atomicdata.dev/classes/Tag",
+        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/resourceArray",
+        "https://atomicdata.dev/properties/description": "List of tags available in a drive.",
+        "https://atomicdata.dev/properties/isA": [
+            "https://atomicdata.dev/classes/Property"
+        ],
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/properties",
+        "https://atomicdata.dev/properties/shortname": "tag-list"
+    },
+    {
+        "@id": "https://atomicdata.dev/classes/ChatRoom",
+        "https://atomicdata.dev/properties/description": "A place where users can post and view chat messages. The `messages` are calculated upon requesting the ChatRoom.\n\nYou can post [`Messages`](https://atomicdata.dev/classes/Message) in them by creating a Commit for the Message, and setting the [`parent`](https://atomicdata.dev/properties/parent) of the `Message` to the `ChatRoom`.",
+        "https://atomicdata.dev/properties/isA": [
+            "https://atomicdata.dev/classes/Class"
+        ],
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/classes",
+        "https://atomicdata.dev/properties/recommends": [
+            "https://atomicdata.dev/properties/messages"
+        ],
+        "https://atomicdata.dev/properties/requires": [
+            "https://atomicdata.dev/properties/name"
+        ],
+        "https://atomicdata.dev/properties/shortname": "chatroom"
+    },
+    {
+        "@id": "https://atomicdata.dev/classes/Message",
+        "https://atomicdata.dev/properties/description": "A single Chat Message, usually in a ChatRoom.\n\nInformation about its creator, and created data can be found using `last-commit`.",
+        "https://atomicdata.dev/properties/isA": [
+            "https://atomicdata.dev/classes/Class"
+        ],
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/classes",
+        "https://atomicdata.dev/properties/requires": [
+            "https://atomicdata.dev/properties/description",
+            "https://atomicdata.dev/properties/parent"
+        ],
+        "https://atomicdata.dev/properties/shortname": "message"
+    },
+    {
+        "@id": "https://atomicdata.dev/properties/messages",
+        "https://atomicdata.dev/properties/classtype": "https://atomicdata.dev/classes/Message",
+        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/resourceArray",
+        "https://atomicdata.dev/properties/description": "The messages in the ChatRoom. This list depends on the other query parameters passed to the ChatRoom resource. By default, only the most recent messages are in this array.",
+        "https://atomicdata.dev/properties/isA": [
+            "https://atomicdata.dev/classes/Property"
+        ],
+        "https://atomicdata.dev/properties/isDynamic": true,
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/properties",
+        "https://atomicdata.dev/properties/shortname": "messages"
     }
 ]

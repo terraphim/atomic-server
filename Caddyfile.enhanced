@@ -1,0 +1,64 @@
+{
+    email admin@privacy1st.org
+    log {
+        level INFO
+        output file /var/log/caddy/atomic-server.log {
+            roll_size 100MiB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+    }
+}
+
+# Main Atomic Server domain with WebSocket support
+evolve.privacy1st.org {
+    # Handle WebSocket connections
+    @websocket {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websocket 127.0.0.1:8081 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Handle regular HTTP requests
+    reverse_proxy 127.0.0.1:8081 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up Host {host}
+    }
+
+    # Security headers
+    header {
+        # HSTS
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+
+        # CSP allowing WebSockets
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self' wss: https: ws:; frame-ancestors 'none';"
+
+        # Other security headers
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy strict-origin-when-cross-origin
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+    }
+
+    # Log access
+    log {
+        output file /var/log/caddy/evolve.access.log {
+            roll_size 100MiB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+        format json
+    }
+}
+
+# WWW redirect
+www.evolve.privacy1st.org {
+    redir https://evolve.privacy1st.org{uri} permanent
+}

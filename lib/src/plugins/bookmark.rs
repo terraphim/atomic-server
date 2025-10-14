@@ -14,6 +14,7 @@ use crate::{
     client::fetch_body,
     endpoints::{Endpoint, HandleGetContext},
     errors::AtomicResult,
+    storelike::ResourceResponse,
     urls,
     values::Value,
     AtomicError, Resource,
@@ -32,7 +33,8 @@ pub fn bookmark_endpoint() -> Endpoint {
     }
 }
 
-fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<Resource> {
+#[tracing::instrument(skip(context))]
+fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<ResourceResponse> {
     let HandleGetContext {
         subject,
         store,
@@ -54,7 +56,7 @@ fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<Resource> 
 
     let (name, path) = match (name, path) {
         (Some(name), Some(path)) => (name, path),
-        _ => return bookmark_endpoint().to_resource(store),
+        _ => return bookmark_endpoint().to_resource_response(store),
     };
 
     let mut resource = Resource::new(subject.to_string());
@@ -91,7 +93,7 @@ fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<Resource> 
 
     resource.set(urls::PREVIEW.into(), Value::Markdown(md.into()), store)?;
 
-    Ok(resource)
+    Ok(ResourceResponse::Resource(resource))
 }
 
 fn fetch_data(url: &str) -> AtomicResult<String> {
@@ -337,7 +339,7 @@ impl Parser {
         })]
     }
 
-    fn resolve_relative_path_handler(&self) -> Handler {
+    fn resolve_relative_path_handler(&self) -> Handler<'_, '_> {
         vec![element!("*[src], *[href]", |el| {
             if let Some(src) = el.get_attribute("src") {
                 el.set_attribute("src", &self.resolve_url(&src))?;
@@ -351,7 +353,7 @@ impl Parser {
         })]
     }
 
-    fn convert_svg_to_image_handler(&self) -> Handler {
+    fn convert_svg_to_image_handler(&self) -> Handler<'_, '_> {
         vec![element!("svg", |el| {
             let id = el.get_attribute("id").ok_or("no id in SVG")?;
             let svg = self.svg_map.get(&id).ok_or("no SVG found with id")?;
@@ -368,7 +370,7 @@ impl Parser {
         })]
     }
 
-    fn simplify_link_text_handler(&self) -> Handler {
+    fn simplify_link_text_handler(&self) -> Handler<'_, '_> {
         vec![element!("a *", |el| {
             let tag_name = el.tag_name().to_lowercase();
             if tag_name != "img" && tag_name != "picture" {
@@ -379,28 +381,28 @@ impl Parser {
         })]
     }
 
-    fn transform_figures_handler(&self) -> Handler {
+    fn transform_figures_handler(&self) -> Handler<'_, '_> {
         vec![element!("figure", |el| {
             el.remove_and_keep_content();
             Ok(())
         })]
     }
 
-    fn transform_figcaptions_handler(&self) -> Handler {
+    fn transform_figcaptions_handler(&self) -> Handler<'_, '_> {
         vec![element!("figcaption", |el| {
             el.set_tag_name("P")?;
             Ok(())
         })]
     }
 
-    fn unfold_sup_elements_handler(&self) -> Handler {
+    fn unfold_sup_elements_handler(&self) -> Handler<'_, '_> {
         vec![element!("sup", |el| {
             el.remove_and_keep_content();
             Ok(())
         })]
     }
 
-    fn trim_link_text_handler(&self) -> Handler {
+    fn trim_link_text_handler(&self) -> Handler<'_, '_> {
         vec![
             element!("a", |el| {
                 self.anchor_text_buffer.borrow_mut().clear();

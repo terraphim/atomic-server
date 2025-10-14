@@ -11,13 +11,15 @@ import { useCallback, useState } from 'react';
 import { BubbleMenu } from './BubbleMenu';
 import { TiptapContextProvider } from './TiptapContext';
 import { ToggleButton } from './ToggleButton';
-import { SlashCommands, suggestion } from './SlashMenu/CommandsExtension';
+import { SlashCommands, buildSuggestion } from './SlashMenu/CommandsExtension';
 import { ExtendedImage } from './ImagePicker';
 import { transition } from '../../helpers/transition';
+import { usePopoverContainer } from '../../components/Popover';
 
 export type AsyncMarkdownEditorProps = {
   placeholder?: string;
   initialContent?: string;
+  autoFocus?: boolean;
   onChange?: (content: string) => void;
   id?: string;
   labelId?: string;
@@ -31,11 +33,16 @@ const LINE_HEIGHT = 1.15;
 export default function AsyncMarkdownEditor({
   placeholder,
   initialContent,
+  autoFocus,
   id,
   labelId,
   onChange,
   onBlur,
 }: AsyncMarkdownEditorProps): React.JSX.Element {
+  const containerRef = usePopoverContainer();
+
+  const container = containerRef.current ?? document.body;
+
   const [extensions] = useState(() => [
     StarterKit,
     Markdown,
@@ -65,7 +72,7 @@ export default function AsyncMarkdownEditor({
       placeholder: placeholder ?? 'Start typing...',
     }),
     SlashCommands.configure({
-      suggestion,
+      suggestion: buildSuggestion(container),
     }),
   ]);
 
@@ -76,6 +83,7 @@ export default function AsyncMarkdownEditor({
     extensions,
     content: markdown,
     onBlur,
+    autofocus: !!autoFocus,
     editorProps: {
       attributes: {
         ...(id && { id }),

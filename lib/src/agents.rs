@@ -3,9 +3,17 @@
 //! https://docs.atomicdata.dev/commits/concepts.html
 
 use base64::{engine::general_purpose, Engine};
+use serde::{Deserialize, Serialize};
 use serde_json::from_slice;
 
 use crate::{errors::AtomicResult, urls, Resource, Storelike, Value};
+
+#[derive(Serialize, Deserialize)]
+struct DecodedSecret {
+    #[serde(rename = "privateKey")]
+    private_key: String,
+    subject: String,
+}
 
 /// None represents no right checks will be performed, effectively SUDO mode.
 #[derive(Clone, Debug, PartialEq)]
@@ -85,7 +93,7 @@ impl Agent {
     pub fn new(name: Option<&str>, store: &impl Storelike) -> AtomicResult<Agent> {
         let keypair = generate_keypair()?;
 
-        Ok(Agent::new_from_private_key(name, store, &keypair.private))
+        Agent::new_from_private_key(name, store, &keypair.private)
     }
 
     /// Creates a new Agent on this server, using the server's Server URL.
@@ -94,16 +102,16 @@ impl Agent {
         name: Option<&str>,
         store: &impl Storelike,
         private_key: &str,
-    ) -> Agent {
+    ) -> AtomicResult<Agent> {
         let keypair = generate_public_key(private_key);
 
-        Agent {
+        Ok(Agent {
             private_key: Some(keypair.private),
             public_key: keypair.public.clone(),
-            subject: format!("{}/agents/{}", store.get_server_url(), keypair.public),
+            subject: format!("{}/agents/{}", store.get_server_url()?, keypair.public),
             name: name.map(|x| x.to_owned()),
             created_at: crate::utils::now(),
-        }
+        })
     }
 
     /// Creates a new Agent on this server, using the server's Server URL.
@@ -114,7 +122,7 @@ impl Agent {
         Ok(Agent {
             private_key: None,
             public_key: public_key.into(),
-            subject: format!("{}/agents/{}", store.get_server_url(), public_key),
+            subject: format!("{}/agents/{}", store.get_server_url()?, public_key),
             name: None,
             created_at: crate::utils::now(),
         })
@@ -145,6 +153,17 @@ impl Agent {
             name: None,
             created_at: crate::utils::now(),
         })
+    }
+
+    pub fn build_secret(&self) -> AtomicResult<String> {
+        let decoded_secret = DecodedSecret {
+            private_key: self.private_key.clone().ok_or("No private key on agent")?,
+            subject: self.subject.clone(),
+        };
+
+        let vec = serde_json::to_vec(&decoded_secret)?;
+        let encoded_secret = encode_base64(&vec);
+        Ok(encoded_secret)
     }
 }
 
@@ -211,6 +230,19 @@ pub fn verify_public_key(public_key: &str) -> AtomicResult<()> {
     Ok(())
 }
 
+impl From<Agent> for ForAgent {
+    fn from(agent: Agent) -> Self {
+        agent.subject.into()
+    }
+}
+
+impl<'a> From<&'a Agent> for ForAgent {
+    fn from(agent: &'a Agent) -> Self {
+        let subject: String = agent.subject.clone();
+        subject.into()
+    }
+}
+
 #[cfg(test)]
 mod test {
     #[cfg(test)]
@@ -253,5 +285,15 @@ mod test {
             agent.subject,
             "http://localhost:9883/agents/RqPwpgHv+PK7Pnz/dVab8hmHjYnvTL1YrlVa6L9G9Zg="
         );
+    }
+
+    #[test]
+    fn can_build_secret() {
+        let og_secret = "eyJwcml2YXRlS2V5IjoiU015eFJnRjdRaGlDN0M1MDZxWFNVS2ZFK1NLQXRDZE5GdTVYZVRqemFkQT0iLCJzdWJqZWN0IjoiaHR0cDovL2xvY2FsaG9zdDo5ODgzL2FnZW50cy9ScVB3cGdIditQSzdQbnovZFZhYjhobUhqWW52VEwxWXJsVmE2TDlHOVpnPSJ9";
+        let agent = Agent::from_secret(og_secret).unwrap();
+        let secret = agent.build_secret().unwrap();
+
+        let agent2 = Agent::from_secret(&secret);
+        assert_eq!(agent2.unwrap().subject, agent.subject);
     }
 }

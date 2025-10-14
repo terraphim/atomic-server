@@ -25,7 +25,8 @@ import { ElementCard } from './ElementCard';
 import { ArticleCard } from '../Article';
 import { styled } from 'styled-components';
 import { ResourceCardTitle } from './ResourceCardTitle';
-import { Column } from '../../components/Row';
+import { Column, Row } from '../../components/Row';
+import { Tag } from '../../components/Tag';
 
 interface ResourceCardProps extends CardViewPropsBase {
   /** The subject URL - the identifier of the resource. */
@@ -37,9 +38,10 @@ interface ResourceCardProps extends CardViewPropsBase {
  * (shortname) is rendered prominently at the top.
  */
 function ResourceCard(
-  props: ResourceCardProps & JSX.IntrinsicElements['div'],
+  props: ResourceCardProps &
+    JSX.IntrinsicElements['div'] & { className?: string },
 ): JSX.Element {
-  const { subject, initialInView } = props;
+  const { initialInView, className, ...rest } = props;
   const [isShown, setIsShown] = useState(false);
   // The (more expensive) ResourceCardInner is only rendered when the component has been in View
   const { ref, inView } = useInView({
@@ -55,13 +57,13 @@ function ResourceCard(
 
   return (
     <Suspense>
-      <Card ref={ref} {...props} about={subject}>
+      <Card {...rest} ref={ref} about={props.subject} className={className}>
         {isShown ? (
           <ResourceCardInner {...props} />
         ) : (
           <>
             <h2>
-              <AtomicLink subject={subject}>{subject}</AtomicLink>
+              <AtomicLink subject={props.subject}>{props.subject}</AtomicLink>
             </h2>
             <p>Resource is loading...</p>
           </>
@@ -121,12 +123,18 @@ export function ResourceCardDefault({
 }: CardViewProps): JSX.Element {
   const [isA] = useArray(resource, core.properties.isA);
   const isAResource = useResource(isA[0]);
+  const [tags] = useArray(resource, dataBrowser.properties.tags);
 
   return (
     <Column gap='0.5rem'>
       <ResourceCardTitle resource={resource}>
-        <ClassName>{isAResource.title}</ClassName>
+        <span>{isAResource.title}</span>
       </ResourceCardTitle>
+      <Row gap='1ch' style={{ fontSize: '0.8rem' }}>
+        {tags.map(tag => (
+          <Tag subject={tag} key={tag} />
+        ))}
+      </Row>
       <DescriptionWrapper>
         <ValueForm
           resource={resource}
@@ -150,8 +158,4 @@ export default ResourceCard;
 const DescriptionWrapper = styled.div`
   max-height: 10rem;
   overflow: hidden;
-`;
-
-const ClassName = styled.span`
-  margin-left: auto;
 `;

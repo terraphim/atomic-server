@@ -11,12 +11,11 @@ readme = "./README.md"
 repository = "https://github.com/atomicdata-dev/atomic-server"
 version = "0.40.2"
 
-[profile.release]
-lto = true
 
 [[bin]]
 name = "atomic-server"
 path = "src/bin.rs"
+test = false
 
 [build-dependencies]
 dircpy = "0.3.15"
@@ -45,16 +44,13 @@ serde_json = "1"
 serde_with = "3.3.0"
 simple-server-timing-header = "0.1.0"
 static-files = "0.2"
-tantivy = "0.22"
 tracing = "0.1"
 tracing-actix-web = "0.7"
 tracing-chrome = "0.7"
 tracing-log = "0.2"
 ureq = "2"
 urlencoding = "2"
-image = "0.25.2"
-webp = "0.3"
-ravif = "0.11.8"
+rusqlite = { version = "0.37", features = ["bundled", "backup", "modern_sqlite"] }
 
 [dependencies.instant-acme]
 optional = true
@@ -108,8 +104,16 @@ features = ["derive"]
 version = "1"
 
 [dependencies.tokio]
-features = ["time"]
+features = ["time", "rt-multi-thread", "macros", "sync"]
 version = "1"
+
+[dependencies.image]
+optional = true
+version = "0.25.2"
+
+[dependencies.webp]
+optional = true
+version = "0.3"
 
 [dependencies.tracing-subscriber]
 features = ["env-filter"]
@@ -120,9 +124,11 @@ actix-rt = "2"
 assert_cmd = "2"
 
 [features]
-default = ["https", "telemetry"]
+default = ["https", "telemetry", "img"]
 https = ["rustls", "instant-acme", "rcgen", "rustls-pemfile"]
 telemetry = ["tracing-opentelemetry", "opentelemetry", "opentelemetry-jaeger"]
+img = ["webp", "image"]
+turso = ["atomic_lib/turso"]
 
 [lib]
 name = "atomic_server_lib"

@@ -5,11 +5,8 @@ import { decode as decodeB64, encode as encodeB64 } from 'base64-arraybuffer';
 import { sha512 } from '@noble/hashes/sha512';
 
 import { Client } from './client.js';
-import { isArray } from './datatypes.js';
-import { JSONADParser } from './parse.js';
 import { Resource } from './resource.js';
 import type { Store } from './store.js';
-import { urls, properties } from './urls.js';
 import type { JSONValue, JSONArray } from './value.js';
 import { commits } from './ontologies/commits.js';
 import { core } from './ontologies/core.js';
@@ -381,16 +378,14 @@ export async function generateKeyPair(): Promise<KeyPair> {
 export function parseCommitResource(resource: Resource): Commit {
   const commit: Commit = {
     id: resource.subject,
-    subject: resource.get(urls.properties.commit.subject) as string,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    set: resource.get(urls.properties.commit.set) as Record<string, any>,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    push: resource.get(urls.properties.commit.push) as Record<string, any>,
-    signer: resource.get(urls.properties.commit.signer) as string,
-    createdAt: resource.get(urls.properties.commit.createdAt) as number,
-    remove: resource.get(urls.properties.commit.remove) as string[],
-    destroy: resource.get(urls.properties.commit.destroy) as boolean,
-    signature: resource.get(urls.properties.commit.signature) as string,
+    subject: resource.get(commits.properties.subject),
+    set: resource.get(commits.properties.set),
+    push: resource.get(commits.properties.push),
+    signer: resource.get(commits.properties.signer),
+    createdAt: resource.get(commits.properties.createdAt),
+    remove: resource.get(commits.properties.remove),
+    destroy: resource.get(commits.properties.destroy),
+    signature: resource.get(commits.properties.signature),
   };
 
   return commit;
@@ -405,19 +400,17 @@ export function parseCommitJSON(str: string): Commit {
       throw new Error(`Commit is not an object`);
     }
 
-    const subject = jsonAdObj[urls.properties.commit.subject];
-    const set = jsonAdObj[urls.properties.commit.set];
-    const push = jsonAdObj[urls.properties.commit.push];
-    const signer = jsonAdObj[urls.properties.commit.signer];
-    const createdAt = jsonAdObj[urls.properties.commit.createdAt];
-    const remove: string[] | undefined =
-      jsonAdObj[urls.properties.commit.remove];
-    const destroy: boolean | undefined =
-      jsonAdObj[urls.properties.commit.destroy];
-    const signature: string = jsonAdObj[urls.properties.commit.signature];
+    const subject = jsonAdObj[commits.properties.subject];
+    const set = jsonAdObj[commits.properties.set];
+    const push = jsonAdObj[commits.properties.push];
+    const signer = jsonAdObj[commits.properties.signer];
+    const createdAt = jsonAdObj[commits.properties.createdAt];
+    const remove: string[] | undefined = jsonAdObj[commits.properties.remove];
+    const destroy: boolean | undefined = jsonAdObj[commits.properties.destroy];
+    const signature: string = jsonAdObj[commits.properties.signature];
     const id: undefined | string = jsonAdObj['@id'];
     const previousCommit: undefined | string =
-      jsonAdObj[urls.properties.commit.previousCommit];
+      jsonAdObj[commits.properties.previousCommit];
 
     if (!signature) {
       throw new Error(`Commit has no signature`);
@@ -445,7 +438,7 @@ export function applyCommitToResource(
   resource: Resource,
   commit: Commit,
 ): Resource {
-  const { set, remove, push } = commit;
+  const { set, remove, push, destroy } = commit;
 
   if (set) {
     execSetCommit(set, resource);
@@ -457,6 +450,12 @@ export function applyCommitToResource(
 
   if (push) {
     execPushCommit(push, resource);
+  }
+
+  if (destroy) {
+    for (const [key] of resource.getPropVals()) {
+      resource.setUnsafe(key, undefined);
+    }
   }
 
   return resource;
@@ -483,7 +482,7 @@ export function parseAndApplyCommit(jsonAdObjStr: string, store: Store) {
 
   if (id) {
     // This is something that the server does, too.
-    resource.setUnsafe(properties.commit.lastCommit, id);
+    resource.setUnsafe(commits.properties.lastCommit, id);
   }
 
   if (destroy) {
@@ -502,28 +501,10 @@ function execSetCommit(
   resource: Resource,
   store?: Store,
 ) {
-  const parser = new JSONADParser();
   const parsedResources: Resource[] = [];
 
   for (const [key, value] of Object.entries(set)) {
-    let newVal = value;
-
-    if (value?.constructor === {}.constructor) {
-      const [result, foundResources] = parser.parseValue(value, key);
-      newVal = result;
-      parsedResources.push(...foundResources);
-    }
-
-    if (isArray(value)) {
-      newVal = value.map(resourceOrURL => {
-        const [result, foundResources] = parser.parseValue(resourceOrURL, key);
-        parsedResources.push(...foundResources);
-
-        return result;
-      });
-    }
-
-    resource.setUnsafe(key, newVal);
+    resource.setUnsafe(key, value);
   }
 
   store && store.addResources(parsedResources);
@@ -535,30 +516,13 @@ function execRemoveCommit(remove: string[], resource: Resource) {
   }
 }
 
-function execPushCommit(
-  push: Record<string, JSONArray>,
-  resource: Resource,
-  store?: Store,
-) {
-  const parser = new JSONADParser();
-  const parsedResources: Resource[] = [];
-
+function execPushCommit(push: Record<string, JSONArray>, resource: Resource) {
   for (const [key, value] of Object.entries(push)) {
     const current = (resource.get(key) as JSONArray) || [];
     const newArr = value as JSONArray;
-    // The `push` arrays may contain full resources.
-    // We parse these here and add them to a list of resources to add to the store.
-    const stringArr = newArr.map(val => {
-      const [result, foundResources] = parser.parseValue(val, key);
-      parsedResources.push(...foundResources);
-
-      return result;
-    });
     // Merge both the old and new items
-    const new_arr = [...current, ...stringArr];
+    const new_arr = [...current, ...newArr];
     // Save it!
     resource.setUnsafe(key, new_arr);
   }
-
-  store && store.addResources(parsedResources);
 }

@@ -1,10 +1,11 @@
 //! App state, which is accessible from handlers
 use crate::{
-    commit_monitor::CommitMonitor, config::Config, errors::AtomicServerResult, search::SearchState,
+    commit_monitor::CommitMonitor, config::Config, db_writer::DbWriter, errors::AtomicServerResult,
+    search::SearchState,
 };
 use atomic_lib::{
-    agents::{generate_public_key, Agent},
-    commit::CommitResponse,
+    agents::Agent,
+    config::{ClientConfig, SharedConfig},
     Storelike,
 };
 
@@ -22,6 +23,8 @@ pub struct AppState {
     pub config: Config,
     /// The Actix Address of the CommitMonitor, which should receive updates when a commit is applied
     pub commit_monitor: actix::Addr<CommitMonitor>,
+    /// The Actix Address of the DbWriter, which handles all database write operations sequentially
+    pub db_writer: actix::Addr<DbWriter>,
     pub search_state: SearchState,
 }
 
@@ -40,7 +43,7 @@ impl AppState {
             tracing::warn!("Development mode is enabled. This will use staging environments for services like LetsEncrypt.");
         }
 
-        let mut store = atomic_lib::Db::init(&config.store_path, config.server_url.clone())?;
+        let store = atomic_lib::Db::init(&config.store_path, config.server_url.clone())?;
         let no_server_resource = store.get_resource(&config.server_url).is_err();
         if no_server_resource {
             tracing::warn!("Server URL resource not found. This is likely because the server URL has changed. Initializing a new database...");
@@ -62,15 +65,11 @@ impl AppState {
         let commit_monitor =
             crate::commit_monitor::create_commit_monitor(store.clone(), search_state.clone());
 
-        let commit_monitor_clone = commit_monitor.clone();
+        // Initialize db writer actor for single-threaded writes, passing commit_monitor for notifications
+        let db_writer = crate::db_writer::create_db_writer(store.clone(), commit_monitor.clone());
 
-        // This closure is called every time a Commit is created
-        let send_commit = move |commit_response: &CommitResponse| {
-            commit_monitor_clone.do_send(crate::actor_messages::CommitMessage {
-                commit_response: commit_response.clone(),
-            });
-        };
-        store.set_handle_commit(Box::new(send_commit));
+        // Note: Commit notifications are now handled directly by the DbWriter actor
+        // The DbWriter sends CommitMessage to the commit_monitor after successful commits
 
         // If the user changes their server_url, the drive will not exist.
         // In this situation, we should re-build a new drive from scratch.
@@ -97,6 +96,7 @@ impl AppState {
             store,
             config,
             commit_monitor,
+            db_writer,
             search_state,
         })
     }
@@ -104,7 +104,7 @@ impl AppState {
     /// Is called when AppState goes out of scope (e.g. when the application closes)
     /// Cleanup code, writing buffers, committing changes, etc.
     fn exit(&self) -> AtomicServerResult<()> {
-        self.search_state.writer.write()?.commit()?;
+        // Cleanup can be added here if needed in the future
         Ok(())
     }
 }
@@ -121,25 +121,26 @@ impl Drop for AppState {
 fn set_default_agent(config: &Config, store: &impl Storelike) -> AtomicServerResult<()> {
     tracing::info!("Setting default agent");
 
-    let ag_cfg: atomic_lib::config::Config = match atomic_lib::config::read_config(Some(
-        &config.config_file_path,
-    )) {
+    let agent = match atomic_lib::config::read_config(Some(&config.config_file_path)) {
         Ok(agent_config) => {
-            match store.get_resource(&agent_config.agent) {
-                Ok(_) => agent_config,
+            let agent = Agent::from_secret(&agent_config.shared.agent_secret)?;
+            match store.get_resource(&agent.subject) {
+                Ok(_) => agent,
                 Err(e) => {
-                    if agent_config.agent.contains(&config.server_url) {
+                    if agent.subject.contains(&config.server_url) {
                         // If there is an agent in the config, but not in the store,
                         // That probably means that the DB has been erased and only the config file exists.
                         // This means that the Agent from the Config file should be recreated, using its private key.
                         tracing::info!("Agent not retrievable, but config was found. Recreating Agent in new store.");
+
                         let recreated_agent = Agent::new_from_private_key(
                             "server".into(),
                             store,
-                            &agent_config.private_key,
-                        );
+                            &agent.private_key.ok_or("No private key found")?,
+                        )?;
                         store.add_resource(&recreated_agent.to_resource()?)?;
-                        agent_config
+
+                        recreated_agent
                     } else {
                         return Err(format!(
                             "An agent is present in {:?}, but this agent cannot be retrieved. Either make sure the agent is retrievable, or remove it from your config. {}",
@@ -152,26 +153,23 @@ fn set_default_agent(config: &Config, store: &impl Storelike) -> AtomicServerRes
         Err(_no_config) => {
             let agent = store.create_agent(Some("server"))?;
             let cfg = atomic_lib::config::Config {
-                agent: agent.subject.clone(),
-                server: config.server_url.clone(),
-                private_key: agent
-                    .private_key
-                    .expect("No private key for agent. Check the config file."),
+                shared: SharedConfig {
+                    agent_secret: agent.build_secret()?,
+                },
+                client: Some(ClientConfig {
+                    server_url: config.server_url.clone(),
+                }),
             };
-            let config_string =
-                atomic_lib::config::write_config(&config.config_file_path, cfg.clone())?;
+
+            cfg.save(&config.config_file_path)?;
+
+            let config_string = cfg.to_string()?;
             tracing::warn!("No existing config found, created a new Config at {:?}. Copy this to your client machine (running atomic-cli or atomic-data-browser) to log in with these credentials. \n{}", &config.config_file_path, config_string);
-            cfg
+
+            agent
         }
     };
 
-    let agent = Agent {
-        subject: ag_cfg.agent.clone(),
-        private_key: Some(ag_cfg.private_key.clone()),
-        public_key: generate_public_key(&ag_cfg.private_key).public,
-        created_at: 0,
-        name: None,
-    };
     tracing::info!("Default Agent is set: {}", &agent.subject);
     store.set_default_agent(agent);
     Ok(())
@@ -179,15 +177,15 @@ fn set_default_agent(config: &Config, store: &impl Storelike) -> AtomicServerRes
 
 /// Creates the first Invitation that is opened by the user on the Home page.
 fn set_up_initial_invite(store: &impl Storelike) -> AtomicServerResult<()> {
-    let subject = format!("{}/setup", store.get_server_url());
+    let subject = format!("{}/setup", store.get_server_url()?);
     tracing::info!("Creating initial Invite at {}", subject);
     let mut invite = store.get_resource_new(&subject);
     invite.set_class(atomic_lib::urls::INVITE);
     invite.set_subject(subject);
-    // This invite can be used only once
+    // This invite can be used 1000 times for testing
     invite.set(
         atomic_lib::urls::USAGES_LEFT.into(),
-        atomic_lib::Value::Integer(1),
+        atomic_lib::Value::Integer(1000),
         store,
     )?;
     invite.set(
@@ -197,12 +195,12 @@ fn set_up_initial_invite(store: &impl Storelike) -> AtomicServerResult<()> {
     )?;
     invite.set(
         atomic_lib::urls::TARGET.into(),
-        atomic_lib::Value::AtomicUrl(store.get_server_url().into()),
+        atomic_lib::Value::AtomicUrl(store.get_server_url()?),
         store,
     )?;
     invite.set(
         atomic_lib::urls::PARENT.into(),
-        atomic_lib::Value::AtomicUrl(store.get_server_url().into()),
+        atomic_lib::Value::AtomicUrl(store.get_server_url()?),
         store,
     )?;
     invite.set(

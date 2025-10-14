@@ -16,7 +16,7 @@ Check out the [Roadmap](https://docs.atomicdata.dev/roadmap.html) if you want to
 - [Running \& compiling](#running--compiling)
   - [Running locally (with local development browser)](#running-locally-with-local-development-browser)
   - [IDE setup (VSCode)](#ide-setup-vscode)
-  - [Compilation using Earthly](#compilation-using-earthly)
+  - [Using Dagger](#using-dagger)
   - [Improve local compilation speed](#improve-local-compilation-speed)
   - [Cross compilation](#cross-compilation)
 - [Git policy](#git-policy)
@@ -59,14 +59,27 @@ That doesn't mean that you should, too, but it means you're less likely to run i
 - **Debugging**: Install the `CodeLLDB` plugin, and press F5 to start debugging. Breakpoints, inspect... The good stuff.
 - **Extensions**: That same directory will give a couple of suggestions for extensions to install.
 
-### Compilation using Earthly
+### Using Dagger
 
-There are `earthfile`s in `browser` and in `atomic-server`.
-These can be used by Earthly to build all steps, including a full docker image.
+Dagger is a tool that's used for building the project.
+The `.dagger` directory and the `dagger.json` file contain most of the configuration.
+Install the Dagger CLI from [here](https://docs.dagger.io/install/) and run the `dagger` command in the root of the project.
+Then you can run the commands from the `.dagger/src/index.ts` file, e.g.
+`dagger call build-browser`
 
-- Make sure `earthly` is installed
-- `earthly --org ontola -P --satellite henk --artifact +e2e/test-results +pipeline`
-- `earthly --org ontola -P --satellite henk --artifact +build-server/atomic-server ./output/atomicserver`
+If you want to output artifacts (e.g. binaries), use:
+`dagger call --interactive release-assets export --pa
+th="./build"`
+
+You can pass secrets / ENVS to dagger like so:
+`dagger call typedoc-publish --netlify-auth-token="env://NETLIFY_AUTH_TOKEN"`
+
+If Dagger is taking up a lot of storage, run:
+`dagger core engine local-cache prune`
+
+Add `-i` to the command to run in interactive mode, add `--output` to save the output to a folder.
+Note that the camelCase functions in the `index.ts` file are converted to kebab-case commands in the Dagger API.
+Check out the [Dagger docs](https://docs.dagger.io/) for more information.
 
 ### Improve local compilation speed
 
@@ -83,7 +96,7 @@ cargo install cross
 cross build --target x86_64-unknown-linux-musl --bin atomic-server --release
 ```
 
-Note that this is also done in the `earthly` file.
+Check the Dagger index.ts file to see how cross compilation is done in the CI.
 
 ## Git policy
 
@@ -218,7 +231,7 @@ Note:
 
 ### CI situation
 
-- Github Action for `push`: builds + tests + docker (using `earthly`, see `Earthfile`)
+- Github Action for `push`: builds + tests + docker (using `dagger`, see `.dagger` and the `.github` folders)
 - Github Action for `tag`: create release + publish binaries
 
 ### Publishing manually - doing the CI's work

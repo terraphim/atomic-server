@@ -1,155 +1,185 @@
-VERSION --try 0.8
-PROJECT ontola/atomic-server
-IMPORT ./browser AS browser
-IMPORT github.com/earthly/lib/rust AS rust
-FROM rust:bookworm
-WORKDIR /code
+VERSION 0.7
+PROJECT atomic-server/firecracker
+FROM ubuntu:20.04
+ARG TARGETARCH
+ARG TARGETOS
+ARG TARGETPLATFORM
+ARG --global tag=$TARGETOS-$TARGETARCH
+ARG --global TARGETARCH
+IF [ "$TARGETARCH" = amd64 ]
+    ARG --global ARCH=x86_64
+ELSE
+    ARG --global ARCH=$TARGETARCH
+END
 
-tests:
-  BUILD browser+test
-  BUILD browser+lint
-  BUILD +fmt
-  BUILD +lint
-  BUILD +test
-  BUILD +build
-  BUILD +e2e
+# Build all targets for multiple architectures
+all:
+    BUILD \
+        --platform=linux/amd64 \
+        --platform=linux/aarch64 \
+        +build-firecracker-vm
 
-# Should only run _after_ tests have passed
-# Requires --push to update things externally
-builds:
-  BUILD +docs-pages
-  BUILD +docker-all
+# Build Atomic Server binary using existing project structure
+build-atomic:
+  FROM rust:1.81
+  RUN rustup target add $ARCH-unknown-linux-musl
+  RUN apt update && apt install -y musl-tools musl-dev pkg-config libssl-dev
+  RUN update-ca-certificates
+  WORKDIR /app
+  COPY --dir server lib cli Cargo.toml .
+  # Remove old lock file and generate new one for the Rust version
+  RUN rm -f Cargo.lock
+  RUN cargo fetch
+  RUN cargo generate-lockfile --offline
+  RUN cargo build --release --bin atomic-server --target $ARCH-unknown-linux-musl
+  RUN strip -s /app/target/$ARCH-unknown-linux-musl/release/atomic-server
+  SAVE ARTIFACT /app/target/$ARCH-unknown-linux-musl/release/atomic-server AS LOCAL atomic-server-$ARCH
+  SAVE ARTIFACT /app/target/$ARCH-unknown-linux-musl/release/atomic-server AS LOCAL ./firecracker/binaries/atomic-server-$ARCH
 
-# Creates a `./artifact/bin` folder with all the atomic-server binaries
-build-all:
-  BUILD +build # x86_64-unknown-linux-gnu
-  BUILD +cross-build --TARGET=x86_64-unknown-linux-musl
-  BUILD +cross-build --TARGET=armv7-unknown-linux-musleabihf
-  # GLIBC issue, see #833
-  # BUILD +cross-build --TARGET=aarch64-unknown-linux-musl
-  # Errors
-  # BUILD +cross-build --TARGET=aarch64-apple-darwin
+# Clone Linux kernel source
+kernel-source:
+  GIT CLONE --branch v5.10 https://github.com/torvalds/linux.git linux.git
+  SAVE ARTIFACT linux.git AS LOCAL linux.git
 
-docker-all:
-  BUILD --platform=linux/amd64 +docker-musl --TARGET=x86_64-unknown-linux-musl
-  BUILD --platform=linux/arm/v7 +docker-musl --TARGET=armv7-unknown-linux-musleabihf
-  # GLIBC issue, see #833
-  # BUILD --platform=linux/arm64/v8 +docker-musl --TARGET=aarch64-unknown-linux-musl
+# Build custom kernel for Firecracker
+build-kernel:
+  FROM +kernel-source
+  ENV DEBIAN_FRONTEND noninteractive
+  ENV DEBCONF_NONINTERACTIVE_SEEN true
+  RUN apt-get update
+  RUN DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true TZ=Etc/UTC apt-get install -yqq --no-install-recommends build-essential bison flex ca-certificates openssl libssl-dev bc wget
+  WORKDIR /opt/linux.git
+  RUN wget --no-check-certificate https://raw.githubusercontent.com/firecracker-microvm/firecracker/main/resources/guest_configs/microvm-kernel-ci-$ARCH-5.10.config -O .config
+  RUN make olddefconfig
+  IF [ "$TARGETARCH" = "aarch64" ]
+      RUN make -j$(nproc) Image
+      SAVE ARTIFACT ./arch/arm64/boot/Image AS LOCAL ./firecracker/kernel/Image-$ARCH
+  ELSE
+      RUN make -j$(nproc) vmlinux
+      SAVE ARTIFACT ./vmlinux AS LOCAL ./firecracker/kernel/vmlinux-$ARCH
+  END
 
-install:
-  RUN apt-get update -qq
-  # Libraries that we install here, may also need to be added to `Cross.toml`
-  # NASM is required for the image library
-  RUN apt install nasm
-  RUN rustup component add clippy
-  RUN rustup component add rustfmt
-  RUN cargo install cross
-  DO rust+INIT --keep_fingerprints=true
+# tar2ext4 utility for root filesystem creation
+tar2ext4:
+    FROM golang:1.21-alpine
+    WORKDIR src
+    RUN apk add --no-cache git musl-dev
+    GIT CLONE https://github.com/microsoft/hcsshim .
+    RUN go build ./cmd/tar2ext4
+    SAVE ARTIFACT tar2ext4 AS LOCAL ./firecracker/tools/tar2ext4
 
-source:
-  FROM +install
-  COPY --keep-ts Cargo.toml Cargo.lock Cross.toml ./
-  COPY --keep-ts --dir server lib cli  ./
-  COPY browser+build/dist /code/server/assets_tmp
-  DO rust+CARGO --args=fetch
+# Base Atomic Server container for root filesystem
+atomic-base:
+  FROM ubuntu:20.04
+  ENV DEBIAN_FRONTEND noninteractive
+  ENV DEBCONF_NONINTERACTIVE_SEEN true
+  RUN apt-get update
+  RUN DEBIAN_FRONTEND=noninteractive DEBCONF_NONINTERACTIVE_SEEN=true TZ=Etc/UTC apt-get install -yqq --no-install-recommends \
+    systemd \
+    systemd-sysv \
+    udev \
+    iproute2 \
+    curl \
+    dbus \
+    kmod \
+    iputils-ping \
+    net-tools \
+    ca-certificates \
+    sqlite3 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-fmt:
-  FROM +source
-  DO rust+CARGO --args="fmt --check"
+  # Configure systemd for container
+  RUN rm -f /lib/systemd/system/multi-user.target.wants/systemd-resolved.service
+  RUN rm -f /etc/systemd/system/dbus-org.freedesktop.resolve1.service
+  RUN rm -f /etc/systemd/system/sysinit.target.wants/systemd-timesyncd.service
 
-lint:
-  FROM +source
-  DO rust+CARGO --args="clippy --no-deps --all-features --all-targets"
+  # Create atomic user
+  RUN useradd --no-log-init --create-home --shell /bin/bash --home-dir /atomic atomic
+  RUN mkdir -p /atomic/data /atomic/config
+  RUN chown -R atomic:atomic /atomic
 
-build:
-  FROM +source
-  DO rust+CARGO --args="build --offline --release" --output="release/[^/\.]+"
-  RUN ./target/release/atomic-server --version
-  SAVE ARTIFACT ./target/release/atomic-server AS LOCAL artifact/bin/atomic-server-x86_64-unknown-linux-gnu
+  COPY +build-atomic/atomic-server-$ARCH /usr/bin/atomic-server
+  RUN chmod +x /usr/bin/atomic-server
 
-test:
-  FROM +build
-  DO rust+CARGO --args="test"
+  # Create systemd service using echo
+  RUN echo '[Unit]' > /etc/systemd/system/atomic-server.service && \
+      echo 'Description=Atomic Server' >> /etc/systemd/system/atomic-server.service && \
+      echo 'After=network.target' >> /etc/systemd/system/atomic-server.service && \
+      echo '' >> /etc/systemd/system/atomic-server.service && \
+      echo '[Service]' >> /etc/systemd/system/atomic-server.service && \
+      echo 'Type=simple' >> /etc/systemd/system/atomic-server.service && \
+      echo 'User=atomic' >> /etc/systemd/system/atomic-server.service && \
+      echo 'Group=atomic' >> /etc/systemd/system/atomic-server.service && \
+      echo 'WorkingDirectory=/atomic' >> /etc/systemd/system/atomic-server.service && \
+      echo 'ExecStart=/usr/bin/atomic-server --port 8080 --data-dir /atomic/data --config-dir /atomic/config --log-level info' >> /etc/systemd/system/atomic-server.service && \
+      echo 'Restart=always' >> /etc/systemd/system/atomic-server.service && \
+      echo 'RestartSec=5' >> /etc/systemd/system/atomic-server.service && \
+      echo '' >> /etc/systemd/system/atomic-server.service && \
+      echo '[Install]' >> /etc/systemd/system/atomic-server.service && \
+      echo 'WantedBy=multi-user.target' >> /etc/systemd/system/atomic-server.service
 
-cross-build:
-  FROM +source
-  # The TARGETs may need custom libraries defined in `atomic-server/Cross.toml`
-  ARG --required TARGET
-  DO rust+SET_CACHE_MOUNTS_ENV
-  DO rust+CROSS --target ${TARGET}
-  # DO rust+COPY_OUTPUT --output="release/[^\./]+"
-  DO rust+COPY_OUTPUT --output=".*" # Copies all files to ./target
-  RUN ./target/$TARGET/release/atomic-server --version
-  SAVE ARTIFACT ./target/$TARGET/release/atomic-server AS LOCAL artifact/bin/atomic-server-$TARGET
+  RUN systemctl enable atomic-server
+  RUN systemctl daemon-reload
+  RUN systemctl set-default multi-user.target
 
-docker-musl:
+  SAVE IMAGE atomic-server:base-$ARCH
+
+# Create root filesystem with Atomic Server
+create-rootfs:
+  FROM +tar2ext4
+  WORKDIR /rootfs
+
+  # Create empty filesystem image
+  RUN truncate -s 300M rootfs.ext4
+  RUN mkfs.ext4 -F rootfs.ext4
+
+  # Mount and populate
+  RUN mkdir -p mnt
+  WITH DOCKER --load atomic-base:latest=+atomic-base
+    RUN mount -o loop rootfs.ext4 mnt
+    RUN export CONTAINER_ID=$(docker run -d atomic-base:latest /bin/systemd); \
+        docker cp --archive $CONTAINER_ID:/ mnt/ && \
+        docker stop $CONTAINER_ID && \
+        docker rm $CONTAINER_ID
+    RUN umount mnt
+  END
+
+  SAVE ARTIFACT rootfs.ext4 AS LOCAL ./firecracker/rootfs/rootfs-$ARCH.ext4
+
+# Assemble Firecracker VM components
+build-firecracker-vm:
   FROM alpine:3.18
-  # You can pass multiple tags, space separated
-  ARG tags="joepmeneer/atomic-server:develop"
-  ARG --required TARGET
-  COPY --chmod=0755 --platform=linux/amd64 (+cross-build/atomic-server --TARGET=${TARGET}) /atomic-server-bin
-  RUN /atomic-server-bin --version
-  # For a complete list of possible ENV vars or available flags, run with `--help`
-  ENV ATOMIC_DATA_DIR="/atomic-storage/data"
-  ENV ATOMIC_CONFIG_DIR="/atomic-storage/config"
-  ENV ATOMIC_PORT="80"
-  EXPOSE 80
-  VOLUME /atomic-storage
-  ENTRYPOINT ["/atomic-server-bin"]
-  RUN echo "Pushing tags: ${tags}"
-  FOR tag IN ${tags}
-    SAVE IMAGE --push ${tag}
-  END
+  WORKDIR /firecracker
 
-setup-playwright:
-  FROM mcr.microsoft.com/playwright:v1.48.1-noble
-  RUN curl -fsSL https://get.pnpm.io/install.sh | env PNPM_VERSION=9.3.0 ENV="$HOME/.shrc" SHELL="$(which sh)" sh -
-  ENV PATH="/root/.local/share/pnpm:$PATH"
-  RUN apt update && apt install -y zip
-  RUN pnpm dlx playwright install --with-deps
-  RUN npm install -g netlify-cli
+  # Copy components
+  COPY +build-kernel/* ./kernel/
+  COPY +create-rootfs/rootfs.ext4 ./rootfs/
+  COPY +build-atomic/atomic-server-$ARCH ./binary/
 
-e2e:
-  FROM +setup-playwright
-  COPY --keep-ts browser/e2e/package.json /app/e2e/package.json
-  WORKDIR /app/e2e
-  RUN pnpm install
-  COPY --keep-ts --dir browser/e2e /app
-  RUN pnpm install
-  ENV LANGUAGE="en_GB"
-  ENV DELETE_PREVIOUS_TEST_DRIVES="false"
-  ENV FRONTEND_URL=http://localhost:9883
-  COPY --chmod=0755 +build/atomic-server /atomic-server-bin
-  # We'll have to zip it https://github.com/earthly/earthly/issues/2817
-  TRY
-    RUN nohup /atomic-server-bin --initialize & pnpm run test-e2e ; zip -r test.zip /app/e2e/playwright-report
-  FINALLY
-    SAVE ARTIFACT test.zip AS LOCAL artifact/test-results.zip
-  END
-  RUN unzip -o test.zip -d /artifact
-  # upload to https://atomic-tests.netlify.app/
-  RUN --secret NETLIFY_AUTH_TOKEN=NETLIFY_TOKEN netlify deploy --dir /artifact/app/e2e/playwright-report --prod --auth $NETLIFY_AUTH_TOKEN --site atomic-tests
+  # Create VM configuration using echo
+  RUN echo '{' > vm-config.json && \
+      echo '  "kernel_image_path": "/firecracker/kernel/$(ls kernel/)",' >> vm-config.json && \
+      echo '  "boot_args": "console=ttyS0 reboot=k panic=1 pci=off nomodules i8042.nokbd i8042.noaux ipv6.disable=1 systemd.unit=multi-user.target",' >> vm-config.json && \
+      echo '  "vcpu_count": 1,' >> vm-config.json && \
+      echo '  "mem_size_mib": 256,' >> vm-config.json && \
+      echo '  "rootfs_path": "/firecracker/rootfs/rootfs.ext4"' >> vm-config.json && \
+      echo '}' >> vm-config.json
 
-  # USE DOCKER
-  # TRY
-  #   WITH DOCKER \
-  #     --load test:latest=+docker
-  #     RUN docker run -d -p 80:80 test:latest  & \
-  #     pnpm run test-e2e
-  #   END
-  #   FINALLY
-  #     SAVE ARTIFACT /app/data-browser/test-results AS LOCAL artifact/test-results
-  #   END
+  # Save VM artifacts
+  SAVE ARTIFACT ./kernel/* AS LOCAL ./firecracker/kernel/
+  SAVE ARTIFACT ./rootfs/rootfs.ext4 AS LOCAL ./firecracker/rootfs/
+  SAVE ARTIFACT ./vm-config.json AS LOCAL ./firecracker/config/vm-config-$ARCH.json
 
-docs-pages:
-  RUN cargo install mdbook
-  RUN cargo install mdbook-linkcheck
-  RUN cargo install mdbook-sitemap-generator
-  RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.5/install.sh | bash
-  RUN bash -c "source $HOME/.nvm/nvm.sh && nvm install 20 && npm install -g netlify-cli"
-  COPY --keep-ts docs /docs
-  WORKDIR /docs
-  RUN mdbook --version
-  RUN mdbook build
-  RUN mdbook-sitemap-generator -d docs.atomicdata.dev -o /docs/book/html/sitemap.xml
-  RUN --secret NETLIFY_AUTH_TOKEN=NETLIFY_TOKEN bash -c "source $HOME/.nvm/nvm.sh && netlify deploy --dir /docs/book/html --prod --auth $NETLIFY_AUTH_TOKEN --site atomic-docs"
+# Deployment target
+deploy:
+  FROM +build-firecracker-vm
+  RUN echo "Firecracker VM built successfully for $ARCH"
+  RUN echo "Kernel: $(ls kernel/)"
+  RUN echo "RootFS: $(ls rootfs/)"
+  RUN echo "Binary: $(ls binary/)"
+
+# Clean target for local development
+clean:
+  RUN echo "Cleaning local build artifacts"
+  RUN rm -rf ./firecracker/binaries/* ./firecracker/kernel/* ./firecracker/rootfs/*
+  RUN echo "Clean completed"

@@ -56,6 +56,7 @@ export function useCreateAndNavigate(): CreateAndNavigate {
         store.notifyResourceManuallyCreated(resource);
       } catch (e) {
         store.notifyError(e);
+        toast.error('Failed to save new resource');
       }
 
       return resource;

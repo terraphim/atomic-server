@@ -12,7 +12,7 @@ use actix::{
     prelude::{Actor, Context, Handler},
     ActorStreamExt, Addr, ContextFutureSpawner,
 };
-use atomic_lib::{agents::ForAgent, Db, Storelike};
+use atomic_lib::{agents::ForAgent, Storelike};
 use chrono::Local;
 use std::collections::{HashMap, HashSet};
 
@@ -21,14 +21,14 @@ use std::collections::{HashMap, HashSet};
 pub struct CommitMonitor {
     /// Maintains a list of all the resources that are being subscribed to, and maps these to websocket connections.
     subscriptions: HashMap<String, HashSet<Addr<WebSocketConnection>>>,
-    store: Db,
+    store: atomic_lib::Db,
     search_state: SearchState,
     last_search_commit: chrono::DateTime<Local>,
     run_expensive_next_tick: bool,
 }
 
-// Only runs expensive index operation (tantivy) once every x seconds
-const REBUILD_INDEX_TIME: std::time::Duration = std::time::Duration::from_secs(5);
+// SQLite FTS5 updates are instant, so we can use a much shorter interval for maintenance
+const REBUILD_INDEX_TIME: std::time::Duration = std::time::Duration::from_millis(500);
 
 // Since his Actor only starts once, there is no need to handle its lifecycle
 impl Actor for CommitMonitor {
@@ -67,6 +67,7 @@ impl Handler<Subscribe> for CommitMonitor {
                     &ForAgent::AgentSubject(msg.agent.clone()),
                 ) {
                     Ok(_explanation) => {
+                        #[allow(clippy::mutable_key_type)]
                         let mut set = if let Some(set) = self.subscriptions.get(&msg.subject) {
                             set.clone()
                         } else {
@@ -100,8 +101,8 @@ impl Handler<Subscribe> for CommitMonitor {
 
 impl CommitMonitor {
     /// When a commit comes in, send it to any listening subscribers,
-    /// and update the value index.
-    /// The search index is only updated if the last search commit is 15 seconds or older.
+    /// and update the search index.
+    /// SQLite search updates are immediate since they don't require batching.
     fn handle_internal(&mut self, msg: CommitMessage) -> AtomicServerResult<()> {
         let target = msg.commit_response.commit.subject.clone();
 
@@ -119,18 +120,17 @@ impl CommitMonitor {
             tracing::debug!("No subscribers for {}", target);
         }
 
-        // Update the search index
+        // Update the SQLite search index - SQLite handles transactions automatically
+        self.search_state.remove_resource(&target)?;
         if let Some(resource) = &msg.commit_response.resource_new {
             // We could one day re-(allow) to keep old resources,
             // but then we also should index the older versions when re-indexing.
-            self.search_state.remove_resource(&target)?;
             // Add new resource to search index
             self.search_state.add_resource(resource, &self.store)?;
-            self.run_expensive_next_tick = true;
-        } else {
-            // If there is no new resource, it must have been deleted, so let's remove it from the search index.
-            self.search_state.remove_resource(&target)?;
         }
+
+        // SQLite FTS5 updates are immediate, no need for expensive batch operations
+        // self.run_expensive_next_tick = true;
         Ok(())
     }
 
@@ -147,9 +147,14 @@ impl CommitMonitor {
     }
 
     /// Run expensive updates that should not be run after every single Commit
+    /// With SQLite, there's no need for explicit commits, but we can use this
+    /// for other maintenance tasks like rebuilding FST indices
     fn update_expensive(&mut self) -> AtomicServerResult<()> {
-        tracing::debug!("Update expensive");
-        self.search_state.writer.write()?.commit()?;
+        tracing::debug!("Update expensive (SQLite maintenance)");
+
+        // SQLite doesn't need explicit commits like Tantivy did
+        // We could add FST index rebuilding or other maintenance tasks here if needed
+
         self.last_search_commit = chrono::Local::now();
         self.run_expensive_next_tick = false;
         Ok(())
@@ -175,7 +180,10 @@ impl Handler<CommitMessage> for CommitMonitor {
 }
 
 /// Spawns a commit monitor actor
-pub fn create_commit_monitor(store: Db, search_state: SearchState) -> Addr<CommitMonitor> {
+pub fn create_commit_monitor(
+    store: atomic_lib::Db,
+    search_state: SearchState,
+) -> Addr<CommitMonitor> {
     tracing::info!("spawning commit monitor");
     crate::commit_monitor::CommitMonitor::create(|_ctx: &mut Context<CommitMonitor>| {
         CommitMonitor {

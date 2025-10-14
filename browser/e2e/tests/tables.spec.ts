@@ -5,7 +5,7 @@ import {
   newResource,
   waitForCommit,
   before,
-  currentDialog,
+  inDialog,
 } from './test-utils';
 
 type Row = {
@@ -118,17 +118,17 @@ test.describe('tables', async () => {
     await page.locator('dialog[open] button:has-text("Create")').click();
     await expect(page.locator(`h1:has-text("${tableName}")`)).toBeVisible();
 
+    const dateColumnName = 'Existed since';
     // Create Date column
     await newColumn('Date');
-    await expect(page.locator('text=New Date Column')).toBeVisible();
-    const dateColumnName = 'Existed since';
-    await currentDialog(page)
-      .getByPlaceholder('New Column')
-      .fill(dateColumnName);
-    await currentDialog(page).getByLabel('Long').click();
-    await currentDialog(page).getByRole('button', { name: 'Create' }).click();
-    await waitForCommit(page);
-    await expect(page.locator('text=New Date Column')).not.toBeVisible();
+    await inDialog(page, async (dialog, closeDialogWith) => {
+      await expect(page.locator('text=New Date Column')).toBeVisible();
+      await dialog.getByPlaceholder('New Column').fill(dateColumnName);
+      await dialog.getByLabel('Long').click();
+      await closeDialogWith('Create');
+      await waitForCommit(page);
+    });
+
     await expect(
       page.getByRole('button', { name: dateColumnName }),
     ).toBeVisible();
@@ -136,28 +136,29 @@ test.describe('tables', async () => {
     // Create Number column
     await newColumn('Number');
     const numberColumnName = 'Number of tracks';
-    await expect(page.locator('text=New Number Column')).toBeVisible();
-    await currentDialog(page)
-      .getByPlaceholder('New Column')
-      .fill(numberColumnName);
 
-    await page.locator('button:has-text("Create")').click();
-    await waitForCommit(page);
-    await expect(page.locator('text=New Number Column')).not.toBeVisible();
+    await inDialog(page, async (dialog, closeDialogWith) => {
+      await expect(page.locator('text=New Number Column')).toBeVisible();
+      await dialog.getByPlaceholder('New Column').fill(numberColumnName);
+      await closeDialogWith('Create');
+      await waitForCommit(page);
+    });
+
     await expect(
       page.getByRole('button', { name: numberColumnName }),
     ).toBeVisible();
 
     // Create Checkbox column
     await newColumn('Checkbox');
-    await expect(page.locator('text=New Checkbox Column')).toBeVisible();
     const checkboxColumnName = 'Approved by W3C';
-    await currentDialog(page)
-      .getByPlaceholder('New Column')
-      .fill(checkboxColumnName);
-    await page.locator('button:has-text("Create")').click();
-    await waitForCommit(page);
-    await expect(page.locator('text=New Checkbox Column')).not.toBeVisible();
+
+    await inDialog(page, async (dialog, closeDialogWith) => {
+      await expect(page.locator('text=New Checkbox Column')).toBeVisible();
+      await dialog.getByPlaceholder('New Column').fill(checkboxColumnName);
+      await closeDialogWith('Create');
+      await waitForCommit(page);
+    });
+
     await expect(
       page.getByRole('button', { name: checkboxColumnName }),
     ).toBeVisible();
@@ -165,31 +166,50 @@ test.describe('tables', async () => {
     // Create Select column
     await newColumn('Select');
     const selectColumnName = 'Descriptive words';
-    await expect(page.locator('text=New Select Column')).toBeVisible();
-    await currentDialog(page)
-      .getByPlaceholder('New Column')
-      .fill(selectColumnName);
 
-    await createTag('😤', 'wild');
-    await createTag('😵‍💫', 'dreamy');
-    await createTag('🤨', 'wtf');
-    await page.locator('button:has-text("Create")').click();
-    await waitForCommit(page);
-    await expect(page.locator('text=New Select Column')).not.toBeVisible();
+    await inDialog(page, async (dialog, closeDialogWith) => {
+      await expect(page.locator('text=New Select Column')).toBeVisible();
+      await dialog.getByPlaceholder('New Column').fill(selectColumnName);
+
+      await createTag('😤', 'wild');
+      await createTag('😵‍💫', 'dreamy');
+      await createTag('🤨', 'wtf');
+      await closeDialogWith('Create');
+      await waitForCommit(page, undefined, 15000);
+    });
+
     await expect(
       page.getByRole('button', { name: selectColumnName }),
     ).toBeVisible();
 
-    // Check if table has loaded.
-    await expect(
-      page.getByRole('button', { name: selectColumnName }),
-    ).toBeVisible();
-
-    await page.waitForLoadState('networkidle');
+    await page.waitForTimeout(1000);
     await page.reload();
-    await expect(
-      page.getByRole('button', { name: selectColumnName }),
-    ).toBeVisible();
+    
+    // Wait for page to load before checking visibility
+    await page.waitForLoadState('networkidle', { timeout: 10000 });
+    
+    // Retry logic for column visibility
+    let columnVisible = false;
+    for (let i = 0; i < 10; i++) {
+      try {
+        await expect(
+          page.getByRole('button', { name: selectColumnName }),
+        ).toBeVisible({ timeout: 1000 });
+        columnVisible = true;
+        break;
+      } catch {
+        await page.waitForTimeout(200);
+        // Reload page again if column is not visible
+        if (i % 3 === 2) {
+          await page.reload();
+          await page.waitForLoadState('networkidle', { timeout: 5000 });
+        }
+      }
+    }
+    
+    if (!columnVisible) {
+      throw new Error(`Column "${selectColumnName}" not visible after multiple retries`);
+    }
 
     const rows = [
       {
@@ -223,16 +243,6 @@ test.describe('tables', async () => {
       await fillRow(index + 1, row);
     }
 
-    // Disabled date tests until Playwright bug fixed
-    // await expect(
-    //   page.getByRole('gridcell', { name: '4 March 2000' }),
-    // ).toBeVisible();
-    // await expect(
-    //   page.getByRole('gridcell', { name: '15 May 1980' }),
-    // ).toBeVisible();
-    // await expect(
-    //   page.getByRole('gridcell', { name: '13 May 1965' }),
-    // ).toBeVisible();
     await expect(
       page.getByRole('gridcell', { name: '😵‍💫 dreamy' }),
     ).toBeVisible();

@@ -32,6 +32,7 @@ impl std::fmt::Debug for AtomicServerError {
 }
 
 #[derive(Serialize)]
+#[allow(dead_code)]
 pub struct AppErrorResponse {
     pub error: String,
 }
@@ -142,26 +143,6 @@ impl<T> From<std::sync::PoisonError<T>> for AtomicServerError {
 
 impl From<std::io::Error> for AtomicServerError {
     fn from(error: std::io::Error) -> Self {
-        AtomicServerError {
-            message: error.to_string(),
-            error_type: AppErrorType::Other,
-            error_resource: None,
-        }
-    }
-}
-
-impl From<tantivy::directory::error::OpenDirectoryError> for AtomicServerError {
-    fn from(error: tantivy::directory::error::OpenDirectoryError) -> Self {
-        AtomicServerError {
-            message: error.to_string(),
-            error_type: AppErrorType::Other,
-            error_resource: None,
-        }
-    }
-}
-
-impl From<tantivy::TantivyError> for AtomicServerError {
-    fn from(error: tantivy::TantivyError) -> Self {
         AtomicServerError {
             message: error.to_string(),
             error_type: AppErrorType::Other,

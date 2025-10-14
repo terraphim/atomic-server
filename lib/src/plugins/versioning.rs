@@ -5,7 +5,7 @@ use crate::{
     collections::CollectionBuilder,
     endpoints::{Endpoint, HandleGetContext},
     errors::AtomicResult,
-    storelike::Query,
+    storelike::{Query, ResourceResponse},
     urls, AtomicError, Commit, Resource, Storelike,
 };
 
@@ -33,7 +33,7 @@ pub fn all_versions_endpoint() -> Endpoint {
 }
 
 #[tracing::instrument]
-fn handle_version_request(context: HandleGetContext) -> AtomicResult<Resource> {
+fn handle_version_request(context: HandleGetContext) -> AtomicResult<ResourceResponse> {
     let params = context.subject.query_pairs();
     let mut commit_url = None;
     for (k, v) in params {
@@ -42,15 +42,15 @@ fn handle_version_request(context: HandleGetContext) -> AtomicResult<Resource> {
         };
     }
     if commit_url.is_none() {
-        return version_endpoint().to_resource(context.store);
+        return version_endpoint().to_resource_response(context.store);
     }
     let mut resource = construct_version(&commit_url.unwrap(), context.store, context.for_agent)?;
     resource.set_subject(context.subject.to_string());
-    Ok(resource)
+    Ok(ResourceResponse::Resource(resource))
 }
 
 #[tracing::instrument]
-fn handle_all_versions_request(context: HandleGetContext) -> AtomicResult<Resource> {
+fn handle_all_versions_request(context: HandleGetContext) -> AtomicResult<ResourceResponse> {
     let HandleGetContext {
         store,
         for_agent,
@@ -64,7 +64,7 @@ fn handle_all_versions_request(context: HandleGetContext) -> AtomicResult<Resour
         };
     }
     if target_subject.is_none() {
-        return all_versions_endpoint().to_resource(store);
+        return all_versions_endpoint().to_resource_response(store);
     }
     let target = target_subject.unwrap();
     let collection_builder = CollectionBuilder {
@@ -80,13 +80,15 @@ fn handle_all_versions_request(context: HandleGetContext) -> AtomicResult<Resour
         include_external: false,
     };
     let mut collection = collection_builder.into_collection(store, for_agent)?;
-    let new_members = collection
+    let new_members: Vec<String> = collection
         .members
         .iter_mut()
         .map(|commit_url| construct_version_endpoint_url(store, commit_url))
-        .collect();
+        .collect::<AtomicResult<Vec<String>>>()?;
     collection.members = new_members;
-    collection.to_resource(store)
+
+    let resource_response = collection.to_resource(store)?;
+    Ok(resource_response)
 }
 
 /// Searches the local store for all commits with this subject, returns sorted from old to new.
@@ -148,12 +150,15 @@ pub fn construct_version(
 }
 
 /// Creates the versioning URL for some specific Commit
-fn construct_version_endpoint_url(store: &impl Storelike, commit_url: &str) -> String {
-    format!(
+fn construct_version_endpoint_url(
+    store: &impl Storelike,
+    commit_url: &str,
+) -> AtomicResult<String> {
+    Ok(format!(
         "{}/versioning?commit={}",
-        store.get_server_url(),
+        store.get_server_url()?,
         urlencoding::encode(commit_url)
-    )
+    ))
 }
 
 /// Gets a version of a Resource by Commit.
@@ -163,7 +168,7 @@ pub fn get_version(
     store: &impl Storelike,
     for_agent: &ForAgent,
 ) -> AtomicResult<Resource> {
-    let version_url = construct_version_endpoint_url(store, commit_url);
+    let version_url = construct_version_endpoint_url(store, commit_url)?;
     match store.get_resource(&version_url) {
         Ok(cached) => Ok(cached),
         Err(_not_cached) => {
@@ -184,6 +189,7 @@ mod test {
     fn constructs_versions() {
         let store = Store::init().unwrap();
         store.populate().unwrap();
+        store.set_server_url("http://localhost");
         let agent = store.create_agent(None).unwrap();
         store.set_default_agent(agent.clone());
         store.get_resource(&agent.subject).unwrap();

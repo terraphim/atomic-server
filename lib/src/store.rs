@@ -6,15 +6,18 @@ use crate::storelike::QueryResult;
 use crate::Value;
 use crate::{atoms::Atom, storelike::Storelike};
 use crate::{errors::AtomicResult, Resource};
-use std::{collections::HashMap, sync::Arc, sync::Mutex};
+use dashmap::DashMap;
+use parking_lot::Mutex;
+use std::{collections::HashMap, sync::Arc};
 
 /// The in-memory store of data, containing the Resources, Properties and Classes
 /// It uses the `default_agent` as the default client.
 #[derive(Clone)]
 pub struct Store {
     // The store currently holds two stores - that is not ideal
-    hashmap: Arc<Mutex<HashMap<String, Resource>>>,
+    hashmap: Arc<DashMap<String, Resource>>,
     default_agent: Arc<Mutex<Option<crate::agents::Agent>>>,
+    server_url: Arc<Mutex<Option<String>>>,
 }
 
 impl Store {
@@ -22,11 +25,18 @@ impl Store {
     /// Run `.populate()` to get useful standard models loaded into your store.
     pub fn init() -> AtomicResult<Store> {
         let store = Store {
-            hashmap: Arc::new(Mutex::new(HashMap::new())),
+            hashmap: Arc::new(DashMap::new()),
             default_agent: Arc::new(Mutex::new(None)),
+            server_url: Arc::new(Mutex::new(None)),
         };
         crate::populate::populate_base_models(&store)?;
         Ok(store)
+    }
+
+    /// Set the URL of the server which endpoint we are using.
+    /// This is needed for generating correct URLs for Commits, Search, etc.
+    pub fn set_server_url(&self, server_url: &str) {
+        *self.server_url.lock() = Some(server_url.into());
     }
 
     /// Triple Pattern Fragments interface.
@@ -140,45 +150,54 @@ impl Storelike for Store {
         }
         if !overwrite_existing {
             let subject = resource.get_subject();
-            if let Some(_r) = self.hashmap.lock().unwrap().get(subject) {
+            if self.hashmap.contains_key(subject) {
                 return Err(format!("{} already present, will not overwrite.", subject).into());
             }
         }
         let _ = update_index;
         // This store has no index, so we don't need to update it.
         self.hashmap
-            .lock()
-            .unwrap()
             .insert(resource.get_subject().into(), resource.clone());
         Ok(())
     }
 
     // TODO: Fix this for local stores, include external does not make sense here
     fn all_resources(&self, _include_external: bool) -> Box<dyn Iterator<Item = Resource>> {
-        Box::new(self.hashmap.lock().unwrap().clone().into_values())
+        let resources: Vec<Resource> = self
+            .hashmap
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect();
+        Box::new(resources.into_iter())
     }
 
-    fn get_server_url(&self) -> &str {
-        // TODO Should be implemented later when companion functionality is here
-        // https://github.com/atomicdata-dev/atomic-server/issues/6
-        "local:store"
+    fn get_server_url(&self) -> AtomicResult<String> {
+        self.server_url
+            .lock()
+            .clone()
+            .ok_or("No server URL found. Set it using `store.set_server_url`.".into())
     }
 
     fn get_self_url(&self) -> Option<String> {
-        Some(self.get_server_url().into())
+        None
     }
 
     fn get_default_agent(&self) -> AtomicResult<Agent> {
-        match self.default_agent.lock().unwrap().to_owned() {
+        match self.default_agent.lock().to_owned() {
             Some(agent) => Ok(agent),
             None => Err("No default agent has been set.".into()),
         }
     }
 
     fn get_resource(&self, subject: &str) -> AtomicResult<Resource> {
-        if let Some(resource) = self.hashmap.lock().unwrap().get(subject) {
-            return Ok(resource.clone());
+        if let Some(resource) = self.hashmap.get(subject) {
+            return Ok(resource.value().clone());
         }
+
+        if let Ok(resource) = self.fetch_resource(subject, self.get_default_agent().ok().as_ref()) {
+            return Ok(resource);
+        };
+
         self.handle_not_found(
             subject,
             "Not found in HashMap.".into(),
@@ -187,19 +206,19 @@ impl Storelike for Store {
     }
 
     fn remove_resource(&self, subject: &str) -> AtomicResult<()> {
-        self.hashmap
-            .lock()
-            .unwrap()
-            .remove_entry(subject)
-            .ok_or(format!(
-                "Resource {} could not be deleted, because it is not found",
-                subject
-            ))?;
+        let resource = self.get_resource(subject)?;
+        for child in resource.get_children(self)? {
+            self.remove_resource(child.get_subject())?;
+        }
+        self.hashmap.remove(subject).ok_or(format!(
+            "Resource {} could not be deleted, because it is not found",
+            subject
+        ))?;
         Ok(())
     }
 
     fn set_default_agent(&self, agent: Agent) {
-        self.default_agent.lock().unwrap().replace(agent);
+        *self.default_agent.lock() = Some(agent);
     }
 
     fn query(&self, q: &crate::storelike::Query) -> AtomicResult<crate::storelike::QueryResult> {
@@ -229,7 +248,7 @@ impl Storelike for Store {
             // These nested resources are not fully calculated - they will be presented as -is
             match self.get_resource_extended(subject, true, &q.for_agent) {
                 Ok(resource) => {
-                    resources.push(resource);
+                    resources.push(resource.to_single());
                 }
                 Err(e) => match &e.error_type {
                     crate::AtomicErrorType::NotFoundError => {}

@@ -41,6 +41,8 @@ pub mod invite;
 // Endpoints
 #[cfg(feature = "html")]
 pub mod bookmark;
+pub mod collections;
+pub mod defaults;
 pub mod export;
 pub mod files;
 pub mod path;

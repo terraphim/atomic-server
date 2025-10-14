@@ -32,16 +32,12 @@ fn val_to_serde(value: Value) -> AtomicResult<SerdeValue> {
         Value::Integer(val) => serde_json::from_str(&val.to_string()).unwrap_or_default(),
         Value::Float(val) => serde_json::from_str(&val.to_string()).unwrap_or_default(),
         Value::Markdown(val) => SerdeValue::String(val),
+        Value::Uri(val) => SerdeValue::String(val),
+        Value::JSON(val) => val,
         Value::ResourceArray(val) => {
             let mut vec: Vec<SerdeValue> = Vec::new();
             for resource in val {
                 match resource {
-                    crate::values::SubResource::Resource(r) => {
-                        vec.push(crate::serialize::propvals_to_json_ad_map(
-                            r.get_propvals(),
-                            Some(r.get_subject().clone()),
-                        )?);
-                    }
                     crate::values::SubResource::Nested(pv) => {
                         vec.push(crate::serialize::propvals_to_json_ad_map(&pv, None)?);
                     }
@@ -59,16 +55,11 @@ fn val_to_serde(value: Value) -> AtomicResult<SerdeValue> {
         Value::Boolean(val) => SerdeValue::Bool(val),
         // TODO: fix this for nested resources in json and json-ld serialization, because this will cause them to fall back to json-ad
         Value::NestedResource(res) => match res {
-            crate::values::SubResource::Resource(r) => crate::serialize::propvals_to_json_ad_map(
-                r.get_propvals(),
-                Some(r.get_subject().clone()),
-            )?,
             crate::values::SubResource::Nested(propvals) => {
                 propvals_to_json_ad_map(&propvals, None)?
             }
             crate::values::SubResource::Subject(s) => SerdeValue::String(s),
         },
-        Value::Resource(_) => todo!(),
     };
     Ok(json_val)
 }
@@ -80,7 +71,9 @@ pub fn propvals_to_json_ad_map(
     propvals: &PropVals,
     subject: Option<String>,
 ) -> AtomicResult<serde_json::Value> {
-    let mut root = Map::new();
+    // OPTIMIZED: Pre-allocate map capacity to reduce reallocations
+    let mut root = Map::with_capacity(propvals.len() + subject.is_some() as usize);
+    
     for (prop_url, value) in propvals.iter() {
         root.insert(prop_url.clone(), val_to_serde(value.clone())?);
     }
@@ -412,5 +405,23 @@ mod test {
         assert!(serialized.contains(r#""description"^^<https://atomicdata.dev/datatypes/slug>"#));
         // This could fail when the `description` resource changes
         assert!(serialized.lines().count() == 5);
+    }
+
+    #[test]
+    #[cfg(feature = "rdf")]
+    fn serialize_turtle() {
+        use crate::Storelike;
+        let store = crate::Store::init().unwrap();
+        store.populate().unwrap();
+        let subject = crate::urls::DESCRIPTION;
+        let resource = store.get_resource(subject).unwrap();
+        let atoms = resource.to_atoms();
+        let serialized = atoms_to_turtle(atoms, &store).unwrap();
+        // Turtle format should be more compact than N-Triples and may contain prefixes
+        assert!(serialized.contains("description"));
+        // Should contain at least some triples
+        assert!(!serialized.is_empty());
+        // Turtle format should contain colons and semicolons
+        assert!(serialized.contains(":") || serialized.contains("@prefix"));
     }
 }

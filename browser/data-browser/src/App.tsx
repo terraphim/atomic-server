@@ -6,9 +6,10 @@ import { getAgentFromLocalStorage } from './helpers/agentStorage';
 import { registerCustomCreateActions } from './components/forms/NewForm/CustomCreateActions';
 import { serverURLStorage } from './helpers/serverURLStorage';
 
-import type { JSX } from 'react';
+import { useEffect, type JSX } from 'react';
 import { RouterProvider } from '@tanstack/react-router';
 import { router } from './routes/Router';
+import { errorHandler } from './handlers/errorHandler';
 
 function fixDevUrl(url: string) {
   if (isDev()) {
@@ -54,6 +55,21 @@ if (isDev()) {
 
 /** Entrypoint of the application. This is where providers go. */
 function App(): JSX.Element {
+  // Handle uncaught errors
+  useEffect(() => {
+    window.onerror = (message, source, lineno, colno, error) => {
+      if (!error) {
+        errorHandler(new Error(`message: ${message}`));
+      }
+
+      errorHandler(error as Error);
+    };
+
+    window.onunhandledrejection = event => {
+      errorHandler(event.reason);
+    };
+  }, []);
+
   return (
     <StoreContext.Provider value={store}>
       <RouterProvider router={router}></RouterProvider>

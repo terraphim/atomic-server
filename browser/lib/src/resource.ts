@@ -11,6 +11,8 @@ import {
 } from './commit.js';
 import { validateDatatype } from './datatypes.js';
 import { isUnauthorized } from './error.js';
+import { collections } from './ontologies/collections.js';
+import { commits } from './ontologies/commits.js';
 import { core } from './ontologies/core.js';
 import { server } from './ontologies/server.js';
 
@@ -22,7 +24,7 @@ import {
   type QuickAccessPropType,
 } from './ontology.js';
 import type { Store } from './store.js';
-import { properties, instances, urls } from './urls.js';
+import { properties, instances } from './urls.js';
 import {
   valToArray,
   type JSONValue,
@@ -89,6 +91,13 @@ export class Resource<C extends OptionalClass = any> {
 
   public constructor(subject: string, newResource?: boolean) {
     if (typeof subject !== 'string') {
+      // Check if the subject is an object with an @id property
+      if (subject && typeof subject === 'object' && '@id' in subject) {
+        throw new Error(
+          'Found named nested resource instead of subjects, this probably means your server is outdated.',
+        );
+      }
+
       throw new Error(
         'Invalid subject given to resource, must be a string, found ' +
           typeof subject,
@@ -186,7 +195,7 @@ export class Resource<C extends OptionalClass = any> {
 
   private get store(): Store {
     if (!this._store) {
-      console.error(`Resource ${this.title} has no store`);
+      console.error(`Resource ${this.subject} has no store`);
       throw new Error('Resource has no store');
     }
 
@@ -405,9 +414,9 @@ export class Resource<C extends OptionalClass = any> {
   public getCommitsCollectionSubject(): string {
     const url = new URL(this.subject);
     url.pathname = '/commits';
-    url.searchParams.append('property', urls.properties.commit.subject);
+    url.searchParams.append('property', commits.properties.subject);
     url.searchParams.append('value', this.subject);
-    url.searchParams.append('sort_by', urls.properties.commit.createdAt);
+    url.searchParams.append('sort_by', commits.properties.createdAt);
     url.searchParams.append('include_nested', 'true');
     url.searchParams.append('page_size', '9999');
 
@@ -432,30 +441,34 @@ export class Resource<C extends OptionalClass = any> {
     const commitsCollection = await this.store.fetchResourceFromServer(
       this.getCommitsCollectionSubject(),
     );
-    const commits = commitsCollection.get(
-      properties.collection.members,
+    const commitList = commitsCollection.get(
+      collections.properties.members,
     ) as string[];
 
     const builtVersions: Version[] = [];
 
     let previousResource = new Resource(this.subject);
 
-    for (let i = 0; i < commits.length; i++) {
-      const commitResource = await this.store.getResource(commits[i]);
+    for (let i = 0; i < commitList.length; i++) {
+      const commitResource = await this.store.getResource(commitList[i]);
       const parsedCommit = parseCommitResource(commitResource);
       const builtResource = applyCommitToResource(
         previousResource.clone(),
         parsedCommit,
       );
+
+      builtResource.setStore(this.store);
+
       builtVersions.push({
         commit: parsedCommit,
         resource: builtResource,
       });
+
       previousResource = builtResource;
 
       // Every 30 cycles we report the progress
       if (progressCallback && i % 30 === 0) {
-        progressCallback(Math.round((i / commits.length) * 100));
+        progressCallback(Math.round((i / commitList.length) * 100));
         await WaitForImmediate();
       }
     }
@@ -463,6 +476,10 @@ export class Resource<C extends OptionalClass = any> {
     return builtVersions;
   }
 
+  /**
+   * Sets the resource to the specified version and saves it.
+   * @param version The version to set the resource to, you can get this using `resource.getHistory()`
+   */
   public async setVersion(version: Version): Promise<void> {
     const versionPropvals = version.resource.getPropVals();
 
@@ -477,6 +494,7 @@ export class Resource<C extends OptionalClass = any> {
       await this.set(key, value);
     }
 
+    // TODO: We should let the user save, this is what we usually do.
     await this.save();
   }
 
@@ -737,6 +755,7 @@ export class Resource<C extends OptionalClass = any> {
       // If it fails, revert to the old resource with the old CommitBuilder
       this.commitBuilder = oldCommitBuilder;
       this.commitError = e;
+      this.new = wasNew;
       this.store.addResources(this, { skipCommitCompare: true });
       reportDone();
       throw e;

@@ -52,7 +52,7 @@ export const generateOntology = async (
   const properties = dedupe(ontology.props.properties ?? []);
 
   for (const prop of properties) {
-    propertyRecord.repordPropertyDefined(prop);
+    propertyRecord.reportPropertyDefined(prop);
   }
 
   const [baseObjStr, reverseMapping] = await generateBaseObject(ontology);
@@ -72,7 +72,7 @@ export const generateOntology = async (
     .replace(Inserts.PROP_SUBJECT_TO_NAME_MAPPING, subToNameStr);
 
   return {
-    filename: `${camelCaseify(ontology.title)}.ts`,
+    filename: `${camelCaseify(ontology.props.shortname)}.ts`,
     content,
   };
 };
