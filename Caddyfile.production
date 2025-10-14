@@ -1,0 +1,87 @@
+{
+    # Global Caddy configuration
+    admin localhost:2019
+    log {
+        level INFO
+        output file /var/log/caddy/atomic-server.log {
+            roll_size 100MiB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+    }
+
+    # Automatic HTTPS
+    email admin@privacy1st.org
+}
+
+# Main Atomic Server domain
+evolve.privacy1st.org {
+    # Reverse proxy to Atomic Server container
+    reverse_proxy 127.0.0.1:8081 {
+        # Health check
+        health_uri /api/v1/server/health
+        health_interval 30s
+        health_timeout 10s
+        health_port 8080
+
+        # Headers for security and forwarding
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+        header_up Host {host}
+
+        # Timeouts and performance
+        transport http {
+            read_timeout 60s
+            write_timeout 60s
+            dial_timeout 10s
+            max_idle_conns 100
+            idle_timeout 90s
+        }
+
+        # Load balancing (for future scaling)
+        lb_policy round_robin
+    }
+
+    # WebSocket support for real-time features
+    @websocket {
+        header Connection *Upgrade*
+        header Upgrade websocket
+    }
+    reverse_proxy @websocket 127.0.0.1:8081
+
+    # API routes with specific handling
+    handle /api/* {
+        reverse_proxy 127.0.0.1:8081 {
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Setup route with special handling
+    handle /setup {
+        reverse_proxy 127.0.0.1:8081
+    }
+
+    # Log access separately
+    log {
+        output file /var/log/caddy/evolve.access.log {
+            roll_size 100MiB
+            roll_keep 10
+            roll_keep_for 720h
+        }
+        format json
+    }
+}
+
+# WWW redirect (optional)
+www.evolve.privacy1st.org {
+    redir https://evolve.privacy1st.org{uri} permanent
+}
+
+# Health check endpoint for monitoring
+:8083 {
+    respond /health "OK" 200
+    respond /metrics "# HELP atomic_server_up Atomic Server is up\n# TYPE atomic_server_up gauge\natomic_server_up 1\n" 200
+}
