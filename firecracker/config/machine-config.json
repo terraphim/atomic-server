@@ -1,0 +1,5 @@
+{
+  "vcpu_count": 1,
+  "mem_size_mib": 256,
+  "track_dirty_pages": false
+}

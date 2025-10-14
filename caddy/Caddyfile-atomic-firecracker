@@ -1,0 +1,52 @@
+{
+    email admin@privacy1st.org
+}
+
+# Atomic Server on Firecracker VM
+evolve.privacy1st.org {
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Handle WebSocket connections for real-time features
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Security headers
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy strict-origin-when-cross-origin
+        Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' ws: wss:; frame-ancestors 'none';"
+    }
+
+    # Enable automatic HTTPS
+    tls {
+        protocols tls1.2 tls1.3
+    }
+}
+
+# Optional: API subdomain for machine-to-machine communication
+api.evolve.privacy1st.org {
+    reverse_proxy 127.0.0.1:8080 {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # API security
+    header {
+        X-Content-Type-Options nosniff
+        X-Frame-Options DENY
+    }
+
+    tls {
+        protocols tls1.2 tls1.3
+    }
+}
