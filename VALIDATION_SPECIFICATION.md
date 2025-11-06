@@ -88,6 +88,8 @@ Currently, no formal validation service exists to:
 | Markdown | `String` | `"# Heading"` | Valid UTF-8, markdown syntax |
 | AtomicUrl | `String` | `"https://example.com/resource"` | Valid HTTP(S) URL |
 | ResourceArray | `Vec<String>` | `["url1", "url2"]` | Array of AtomicUrls |
+| Uri | `String` | `"https://example.com"` or `"/path"` | Valid URI (RFC 3986), can be relative |
+| JSON | `serde_json::Value` | `{"any": "json"}` | Valid JSON (object, array, primitive, null) |
 
 **File:** `lib/src/datatype.rs:1-100`
 
@@ -127,11 +129,14 @@ pub enum Value {
     AtomicUrl(String),
     ResourceArray(Vec<SubResource>),
     NestedResource(SubResource),
-    Resource(Box<Resource>),
+    Uri(String),                    // NEW in upstream: RFC 3986 URI
+    JSON(serde_json::Value),        // NEW in upstream: Arbitrary JSON
     Unsupported(UnsupportedValue),
 }
 ```
 **File:** `lib/src/values.rs:15-30`
+
+**Note:** The `Resource(Box<Resource>)` variant was removed in upstream to simplify the data model. Resources are now only referenced via `AtomicUrl` or embedded as `NestedResource`.
 
 ### 3.2 Schema Specification
 
