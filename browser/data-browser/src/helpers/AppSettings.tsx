@@ -22,16 +22,17 @@ interface ProviderProps {
 export const AppSettingsContextProvider = (
   props: ProviderProps,
 ): JSX.Element => {
+  // == SYSTEM ==
+  const [agent, setAgent] = useCurrentAgent();
+  const [baseURL, setBaseURL] = useServerURL();
+  const [drive, innerSetDrive] = useLocalStorage('drive', baseURL);
+
+  // == APPEARANCE ==
   const [darkMode, setDarkMode, darkModeSetting] = useDarkMode();
   const [mainColor, setMainColor] = useLocalStorage('mainColor', '#1b50d8');
   const [navbarTop, setNavbarTop] = useLocalStorage('navbarTop', false);
   const [hideTemplates, setHideTemplates] = useLocalStorage(
     'hideTemplates',
-    false,
-  );
-
-  const [viewTransitionsDisabled, setViewTransitionsDisabled] = useLocalStorage(
-    'viewTransitionsDisabled',
     false,
   );
   const [navbarFloating, setNavbarFloating] = useLocalStorage(
@@ -43,12 +44,13 @@ export const AppSettingsContextProvider = (
     window.innerWidth > SIDEBAR_TOGGLE_WIDTH,
   );
 
+  // == ACCESSIBILITY ==
+  const [viewTransitionsDisabled, setViewTransitionsDisabled] = useLocalStorage(
+    'viewTransitionsDisabled',
+    false,
+  );
   const [sidebarKeyboardDndEnabled, setSidebarKeyboardDndEnabled] =
     useLocalStorage('sidebarKeyboardDndEnabled', false);
-
-  const [agent, setAgent] = useCurrentAgent();
-  const [baseURL, setBaseURL] = useServerURL();
-  const [drive, innerSetDrive] = useLocalStorage('drive', baseURL);
 
   const setDrive = useCallback(
     (newDrive: string) => {

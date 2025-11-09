@@ -1,5 +1,5 @@
-import { Datatype, useResource } from '@tomic/react';
-import { useCallback, useContext, useMemo, useState, type JSX } from 'react';
+import { Datatype, useCanWrite, useResource } from '@tomic/react';
+import { useCallback, useContext, useMemo, useState } from 'react';
 import { FaChevronCircleDown, FaFile, FaHashtag, FaPlus } from 'react-icons/fa';
 import { DIVIDER, DropdownMenu, DropdownItem } from '../../components/Dropdown';
 import { buildDefaultTrigger } from '../../components/Dropdown/DefaultTrigger';
@@ -7,6 +7,7 @@ import { NewPropertyDialog } from './PropertyForm/NewPropertyDialog';
 import { TablePageContext } from './tablePageContext';
 import { ExternalPropertyDialog } from './PropertyForm/ExternalPropertyDialog';
 import { dataTypeIconMap } from '../../helpers/iconMap';
+import { FaCode } from 'react-icons/fa6';
 
 const NewColumnTrigger = buildDefaultTrigger(<FaPlus />, 'Add column');
 
@@ -18,13 +19,15 @@ const SelectIcon = FaChevronCircleDown;
 const FileIcon = FaFile;
 const RelationIcon = dataTypeIconMap.get(Datatype.ATOMIC_URL)!;
 
-export function NewColumnButton(): JSX.Element {
+export const NewColumnButton: React.FC = () => {
   const [showDialog, setShowDialog] = useState(false);
   const [showExternalDialog, setShowExternalDialog] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState<string>();
 
   const { tableClassSubject } = useContext(TablePageContext);
   const tableClassResource = useResource(tableClassSubject);
+
+  const canWrite = useCanWrite(tableClassResource);
 
   const openDialog = useCallback(
     (category: string) => () => {
@@ -73,6 +76,12 @@ export function NewColumnButton(): JSX.Element {
         icon: <FileIcon />,
       },
       {
+        id: 'json',
+        label: 'JSON',
+        onClick: openDialog('json'),
+        icon: <FaCode />,
+      },
+      {
         id: 'relation',
         label: 'Relation',
         onClick: openDialog('relation'),
@@ -87,6 +96,10 @@ export function NewColumnButton(): JSX.Element {
       },
     ];
   }, []);
+
+  if (!canWrite) {
+    return null;
+  }
 
   return (
     <>
@@ -104,4 +117,4 @@ export function NewColumnButton(): JSX.Element {
       />
     </>
   );
-}
+};

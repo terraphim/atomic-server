@@ -710,7 +710,7 @@
     },
     {
         "@id": "https://atomicdata.dev/properties/published-at",
-        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/timestamp",
+        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/date",
         "https://atomicdata.dev/properties/description": "DateTime at which an item is made public.",
         "https://atomicdata.dev/properties/isA": [
             "https://atomicdata.dev/classes/Property"
@@ -1140,6 +1140,15 @@
         "https://atomicdata.dev/properties/shortname": "uri"
     },
     {
+        "@id": "https://atomicdata.dev/datatypes/json",
+        "https://atomicdata.dev/properties/description": "An untyped JSON object.",
+        "https://atomicdata.dev/properties/isA": [
+            "https://atomicdata.dev/classes/Datatype"
+        ],
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/datatypes",
+        "https://atomicdata.dev/properties/shortname": "json"
+    },
+    {
         "@id": "https://atomicdata.dev/classes/Folder",
         "https://atomicdata.dev/properties/description": "Acts as a parent for resources, useful for ordering data.",
         "https://atomicdata.dev/properties/isA": [
@@ -1172,5 +1181,16 @@
             "https://atomicdata.dev/property/url"
         ],
         "https://atomicdata.dev/properties/shortname": "bookmark"
+    },
+    {
+        "@id": "https://atomicdata.dev/ontology/data-browser/property/tag-list",
+        "https://atomicdata.dev/properties/classtype": "https://atomicdata.dev/classes/Tag",
+        "https://atomicdata.dev/properties/datatype": "https://atomicdata.dev/datatypes/resourceArray",
+        "https://atomicdata.dev/properties/description": "List of tags available in a drive.",
+        "https://atomicdata.dev/properties/isA": [
+            "https://atomicdata.dev/classes/Property"
+        ],
+        "https://atomicdata.dev/properties/parent": "https://atomicdata.dev/properties",
+        "https://atomicdata.dev/properties/shortname": "tag-list"
     }
 ]

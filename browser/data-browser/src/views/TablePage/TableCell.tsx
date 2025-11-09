@@ -30,6 +30,8 @@ interface TableCell {
   onEditNextRow?: () => void;
 }
 
+const SAVE_DEBOUNCE_TIME = 200;
+
 function useIsEditing(row: number, column: number) {
   const { cursorMode, selectedColumn, selectedRow } = useTableEditorContext();
 
@@ -47,6 +49,8 @@ const valueOpts = {
   validate: false,
 };
 
+const emptyFunc = () => undefined;
+
 export function TableCell({
   columnIndex,
   rowIndex,
@@ -56,7 +60,12 @@ export function TableCell({
 }: TableCell): JSX.Element {
   const { setActiveCell } = useTableEditorContext();
   const { addItemsToHistoryStack } = useContext(TablePageContext);
-  const [save, savePending] = useDebouncedSave(resource, 200);
+  // We give an empty error handler to debouncedSave so it doesn't spam the user with error popups when the value is invalid.
+  const [save, savePending] = useDebouncedSave(
+    resource,
+    SAVE_DEBOUNCE_TIME,
+    emptyFunc,
+  );
   const [value, setValue] = useValue(resource, property.subject, valueOpts);
 
   const [createdAt, setCreatedAt] = useValue(
@@ -89,7 +98,15 @@ export function TableCell({
 
       save();
     },
-    [setValue, setCreatedAt, createdAt, resource, property, save],
+    [
+      setValue,
+      setCreatedAt,
+      createdAt,
+      resource,
+      property,
+      save,
+      addItemsToHistoryStack,
+    ],
   );
 
   const handleEnterEditModeWithCharacter = useCallback(
@@ -109,7 +126,14 @@ export function TableCell({
         setActiveCell(rowIndex + 1, columnIndex);
       }
     }
-  }, [savePending, setActiveCell, rowIndex, columnIndex]);
+  }, [
+    savePending,
+    setActiveCell,
+    rowIndex,
+    columnIndex,
+    onEditNextRow,
+    resource,
+  ]);
 
   return (
     <Cell

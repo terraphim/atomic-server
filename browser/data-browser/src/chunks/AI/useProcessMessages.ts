@@ -1,0 +1,169 @@
+import { commits, useStore, type Resource, type Store } from '@tomic/react';
+import { type AIMessageContext, type AtomicUIMessage } from './types';
+import { toClassString } from './atomicSchemaHelpers';
+import {
+  useMcpServers,
+  type ReadMCPResource,
+} from '@components/AI/MCP/useMcpServers';
+
+/**
+ * A hook that processes AI chat messages by applying context.
+ */
+export function useProcessMessages() {
+  const store = useStore();
+  const { readMCPResource } = useMcpServers();
+
+  return async (messages: AtomicUIMessage[]): Promise<AtomicUIMessage[]> => {
+    const map = async (message: AtomicUIMessage) => {
+      if (message.metadata?.context) {
+        return {
+          ...message,
+          parts: [
+            ...message.parts,
+            {
+              type: 'text',
+              text: await addContextToMessage(
+                '',
+                message.metadata.context,
+                store,
+                readMCPResource,
+              ),
+            },
+          ],
+        };
+      }
+
+      return message;
+    };
+
+    return Promise.all(messages.map(map)) as Promise<AtomicUIMessage[]>;
+  };
+}
+
+/**
+ * Converts an Atomic Resource into a plain object representation
+ * @param resource - The Atomic Resource to convert
+ * @param includeCommitData - Whether to include commit-related data in the output
+ * @returns A plain object containing the resource's properties
+ */
+const toResultObject = (resource: Resource, includeCommitData: boolean) => {
+  const props = Object.fromEntries(
+    Array.from(resource.getPropVals().entries()).filter(
+      ([key]) => includeCommitData || key !== commits.properties.lastCommit,
+    ),
+  );
+
+  return {
+    '@id': resource.subject,
+    ...props,
+  };
+};
+
+/**
+ * Processes atomic resources from context
+ */
+const processAtomicResources = async (
+  context: AIMessageContext[],
+  store: Store,
+) => {
+  const atomicContext = context.filter(x => x.type === 'atomic-resource');
+
+  if (atomicContext.length === 0) {
+    return { resourcesContent: '', schemasContent: '' };
+  }
+
+  const subjects = atomicContext.map(x => x.subject);
+  const resources = await Promise.all(subjects.map(s => store.getResource(s)));
+
+  const resourcesContent = resources
+    .map(
+      r => `An atomic resource called ${r.title}. Data:\n\`\`\`json
+${JSON.stringify(toResultObject(r, true), null, 2)}
+\`\`\``,
+    )
+    .join('\n');
+
+  const classes = Array.from(new Set(resources.flatMap(r => r.getClasses())));
+  const schemaDefs = await Promise.all(
+    classes.map(c => toClassString(c, store)),
+  );
+
+  return {
+    resourcesContent,
+    schemasContent: schemaDefs.join('\n'),
+  };
+};
+
+/**
+ * Processes MCP resources from context
+ */
+const processMCPResources = async (
+  context: AIMessageContext[],
+  readMCPResource: ReadMCPResource,
+) => {
+  const mcpContext = context.filter(x => x.type === 'mcp-resource');
+
+  if (mcpContext.length === 0) {
+    return '';
+  }
+
+  const mcpResults = await Promise.all(
+    mcpContext.map(async ctx => {
+      try {
+        const resourceData = await readMCPResource(ctx.serverId, ctx.uri);
+
+        return `\`\`\`${resourceData.mimeType || 'text'}
+${typeof resourceData.contents === 'string' ? resourceData.contents : JSON.stringify(resourceData.contents, null, 2)}
+\`\`\``;
+      } catch (error) {
+        return `MCP resource "${ctx.name}" (${ctx.uri}): Error loading - ${error instanceof Error ? error.message : 'Unknown error'}`;
+      }
+    }),
+  );
+
+  return mcpResults.join('\n');
+};
+
+/**
+ * Adds context information to a message by including resource data and schema definitions
+ * @param message - The original message to add context to
+ * @param context - Array of context objects containing resource references
+ * @param store - An Atomic Data store instance
+ * @param readMCPResource - Function to read MCP resources
+ * @returns A promise that resolves to the message with added context
+ */
+const addContextToMessage = async (
+  message: string,
+  context: AIMessageContext[],
+  store: Store,
+  readMCPResource: ReadMCPResource,
+) => {
+  const [atomicData, mcpContent] = await Promise.all([
+    processAtomicResources(context, store),
+    processMCPResources(context, readMCPResource),
+  ]);
+
+  let messageWithContext = message;
+
+  // Add atomic context if we have any atomic resources or schemas
+  if (atomicData.resourcesContent || atomicData.schemasContent) {
+    messageWithContext += `\n<atomic-context>`;
+
+    if (atomicData.resourcesContent) {
+      messageWithContext += `\n<resources>\n${atomicData.resourcesContent}\n</resources>`;
+    }
+
+    if (atomicData.schemasContent) {
+      messageWithContext += `\n<schemas>\n${atomicData.schemasContent}\n</schemas>`;
+    }
+
+    messageWithContext += `\n</atomic-context>`;
+  }
+
+  // Add MCP context if we have any MCP resources
+  if (mcpContent) {
+    messageWithContext += `\n<context>\n${mcpContent}\n</context>`;
+  }
+
+  return messageWithContext;
+};

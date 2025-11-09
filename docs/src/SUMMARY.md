@@ -14,6 +14,7 @@
   - [Installation](atomicserver/installation.md)
   - [Using the GUI](atomicserver/gui.md)
     - [Tables](atomicserver/gui/tables.md)
+    - [AI and Atomic Assistant](atomicserver/gui/ai-and-atomic-assistant.md)
   - [API](atomicserver/API.md)
   - [Creating a JSON-AD file](create-json-ad.md)
   - [FAQ & troubleshooting](atomicserver/faq.md)
@@ -38,9 +39,9 @@
       - [Image](svelte/image.md)
     - [@tomic/template](create-template/atomic-template.md)
     - [@tomic/cli](js-cli.md)
-  - [Rust](rust-lib.md)
-    - [Rust lib](rust-lib.md)
-    - [Rust CLI](rust-cli.md)
+  - [Rust](rust.md)
+    - [CLI](rust-cli.md)
+    - [Lib](rust-lib.md)
 
 # Guides
 

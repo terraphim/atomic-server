@@ -55,14 +55,6 @@ impl Resource {
         &mut self,
         store: &impl Storelike,
     ) -> AtomicResult<crate::commit::CommitResponse> {
-        let children = self.get_children(store);
-
-        if let Ok(children) = children {
-            for mut child in children {
-                child.destroy(store)?;
-            }
-        }
-
         self.commit.destroy(true);
         self.save(store)
             .map_err(|e| format!("Failed to destroy {} : {}", self.subject, e).into())
@@ -210,15 +202,15 @@ impl Resource {
         }
     }
 
-    pub fn random_subject(store: &impl Storelike) -> String {
-        format!("{}/{}", store.get_server_url(), Ulid::new().to_string())
+    pub fn random_subject(store: &impl Storelike) -> AtomicResult<String> {
+        let server_url = store.get_server_url()?;
+        Ok(format!("{}/{}", server_url, Ulid::new().to_string()))
     }
 
     /// Create a new resource with a generated Subject
-    pub fn new_generate_subject(store: &impl Storelike) -> Resource {
-        let subject = Resource::random_subject(store);
-
-        Resource::new(subject)
+    pub fn new_generate_subject(store: &impl Storelike) -> AtomicResult<Resource> {
+        let subject = Resource::random_subject(store)?;
+        Ok(Resource::new(subject))
     }
 
     /// Create a new instance of some Class.
@@ -229,7 +221,7 @@ impl Resource {
         let class = store.get_class(class_url)?;
         let subject = format!(
             "{}/{}/{}",
-            store.get_server_url(),
+            store.get_server_url()?,
             &class.shortname,
             random_string(10)
         );
@@ -553,14 +545,15 @@ impl Resource {
         serde_json::to_string_pretty(&obj).map_err(|_| "Could not serialize to JSON-LD".into())
     }
 
+    pub fn to_atoms_iter(&self) -> impl Iterator<Item = Atom> + '_ {
+        self.propvals.iter().map(|(property, value)| {
+            Atom::new(self.subject.to_string(), property.clone(), value.clone())
+        })
+    }
+
     #[instrument(skip_all)]
     pub fn to_atoms(&self) -> Vec<Atom> {
-        let mut atoms: Vec<Atom> = Vec::new();
-        for (property, value) in self.propvals.iter() {
-            let atom = Atom::new(self.subject.to_string(), property.clone(), value.clone());
-            atoms.push(atom);
-        }
-        atoms
+        self.to_atoms_iter().collect()
     }
 
     #[instrument(skip_all)]
@@ -569,12 +562,73 @@ impl Resource {
     pub fn to_n_triples(&self, store: &impl Storelike) -> AtomicResult<String> {
         crate::serialize::atoms_to_ntriples(self.to_atoms(), store)
     }
+
+    pub fn vec_to_json_ad(resources: &Vec<Resource>) -> AtomicResult<String> {
+        let str = resources
+            .iter()
+            .map(|r| r.to_json_ad())
+            .collect::<AtomicResult<Vec<String>>>()?
+            .join(",");
+
+        Ok(format!("[{}]", str))
+    }
+
+    pub fn vec_to_json(resources: &Vec<Resource>, store: &impl Storelike) -> AtomicResult<String> {
+        let str = resources
+            .iter()
+            .map(|r| r.to_json(store))
+            .collect::<AtomicResult<Vec<String>>>()?
+            .join(",");
+
+        Ok(format!("[{}]", str))
+    }
+
+    pub fn vec_to_json_ld(
+        resources: &Vec<Resource>,
+        store: &impl Storelike,
+    ) -> AtomicResult<String> {
+        let str = resources
+            .iter()
+            .map(|r| r.to_json_ld(store))
+            .collect::<AtomicResult<Vec<String>>>()?
+            .join(",");
+
+        Ok(format!("[{}]", str))
+    }
+
+    pub fn vec_to_atoms(resources: &Vec<Resource>) -> Vec<Atom> {
+        let mut atoms = Vec::new();
+
+        for resource in resources {
+            atoms.extend(resource.to_atoms_iter());
+        }
+
+        atoms
+    }
+
+    pub fn vec_to_n_triples(
+        resources: &Vec<Resource>,
+        store: &impl Storelike,
+    ) -> AtomicResult<String> {
+        let atoms = Self::vec_to_atoms(resources);
+        crate::serialize::atoms_to_ntriples(atoms, store)
+    }
+}
+
+impl From<Resource> for crate::storelike::ResourceResponse {
+    fn from(resource: Resource) -> Self {
+        crate::storelike::ResourceResponse::Resource(resource)
+    }
+}
+
+impl From<&Resource> for crate::storelike::ResourceResponse {
+    fn from(resource: &Resource) -> Self {
+        crate::storelike::ResourceResponse::Resource(resource.clone())
+    }
 }
 
 #[cfg(test)]
 mod test {
-    use ntest::assert_panics;
-
     use super::*;
     use crate::{test_utils::init_store, urls};
 
@@ -781,7 +835,7 @@ mod test {
         let store = init_store();
         let property: String = urls::CHILDREN.into();
         let append_value = "http://localhost/someURL";
-        let mut resource = Resource::new_generate_subject(&store);
+        let mut resource = Resource::new_generate_subject(&store).unwrap();
         resource
             .push(&property, append_value.into(), false)
             .unwrap();
@@ -807,11 +861,11 @@ mod test {
     #[test]
     fn get_children() {
         let store = init_store();
-        let mut resource1 = Resource::new_generate_subject(&store);
+        let mut resource1 = Resource::new_generate_subject(&store).unwrap();
         let subject1 = resource1.get_subject().to_string();
         resource1.save_locally(&store).unwrap();
 
-        let mut resource2 = Resource::new_generate_subject(&store);
+        let mut resource2 = Resource::new_generate_subject(&store).unwrap();
         resource2
             .set(urls::PARENT.into(), Value::AtomicUrl(subject1), &store)
             .unwrap();
@@ -822,83 +876,5 @@ mod test {
 
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].get_subject(), &subject2);
-    }
-
-    #[test]
-    fn destroy() {
-        let store = init_store();
-        // Create 3 resources in a tree structure.
-
-        let mut resource1 = Resource::new_generate_subject(&store);
-        let subject1 = resource1.get_subject().to_string();
-        resource1.save_locally(&store).unwrap();
-
-        let mut resource2 = Resource::new_generate_subject(&store);
-        resource2
-            .set(
-                urls::PARENT.into(),
-                Value::AtomicUrl(subject1.clone()),
-                &store,
-            )
-            .unwrap();
-        let subject2 = resource2.get_subject().to_string();
-        resource2.save_locally(&store).unwrap();
-
-        let mut resource3 = Resource::new_generate_subject(&store);
-        let resource3_subject = resource3.get_subject().to_string();
-
-        resource3
-            .set(
-                urls::PARENT.into(),
-                Value::AtomicUrl(subject2.clone()),
-                &store,
-            )
-            .unwrap();
-        resource3
-            .set(urls::NAME.into(), Value::String("resource3".into()), &store)
-            .unwrap();
-        let subject3 = resource3.get_subject().to_string();
-        resource3.save_locally(&store).unwrap();
-
-        // Check if all 3 resources exist in the store.
-
-        assert_eq!(
-            store.get_resource(&subject1).unwrap().get_subject(),
-            &subject1
-        );
-        assert_eq!(
-            store.get_resource(&subject2).unwrap().get_subject(),
-            &subject2
-        );
-        assert_eq!(
-            store.get_resource(&subject3).unwrap().get_subject(),
-            &subject3
-        );
-
-        // Destroy the first resource, and check if all 3 resources are gone.
-        resource1.destroy(&store).unwrap();
-
-        assert_panics!({ store.get_resource(&subject1).unwrap() });
-        assert_panics!({ store.get_resource(&subject2).unwrap() });
-        assert_panics!({ store.get_resource(&subject3).unwrap() });
-
-        // Create a new resource with the same subject as resource 3 to check if there's no old data left.
-        let mut resource4 = Resource::new(resource3_subject.to_string());
-
-        resource4
-            .set(
-                urls::DESCRIPTION.into(),
-                Value::Markdown("description thing".into()),
-                &store,
-            )
-            .unwrap();
-        resource4.save_locally(&store).unwrap();
-
-        assert_eq!(
-            resource4.get(urls::DESCRIPTION).unwrap().to_string(),
-            "description thing"
-        );
-
-        assert!(resource4.get(urls::NAME).is_err());
     }
 }

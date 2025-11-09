@@ -9,6 +9,7 @@ export interface FlexProps extends React.HTMLAttributes<HTMLDivElement> {
   justify?: CSS.Property.JustifyContent;
   direction?: CSS.Property.FlexDirection;
   center?: boolean;
+  align?: CSS.Property.AlignItems;
   wrapItems?: boolean;
   fullWidth?: boolean;
   fullHeight?: boolean;
@@ -52,8 +53,14 @@ export const Column = forwardRef<
 
 Column.displayName = 'Column';
 
-const Flex = styled.div<FlexProps>`
-  align-items: ${p => (p.center ? 'center' : 'initial')};
+/**
+ * Underlying layout of the Row and Column components.
+ * Do not use this component directly and don't extend it.
+ *
+ * This component is only exported so it can be used in css selectors.
+ */
+export const Flex = styled.div<FlexProps>`
+  align-items: ${p => (p.center ? 'center' : p.align ?? 'initial')};
   display: flex;
   gap: ${p => p.gap ?? `${p.theme.margin}rem`};
   justify-content: ${p => p.justify ?? 'start'};

@@ -27,6 +27,7 @@ import { initOntologies } from './ontologies/index.js';
 type ResourceCallback<C extends OptionalClass = UnknownClass> = (
   resource: Resource<C>,
 ) => void;
+type SubjectCallback = (subject: string) => void;
 /** Callback called when the stores agent changes */
 type AgentCallback = (agent: Agent | undefined) => void;
 type ErrorCallback = (e: Error) => void;
@@ -92,7 +93,7 @@ export interface ImportJsonADOptions {
  */
 type StoreEventHandlers = {
   [StoreEvents.ResourceSaved]: ResourceCallback;
-  [StoreEvents.ResourceRemoved]: ResourceCallback;
+  [StoreEvents.ResourceRemoved]: SubjectCallback;
   [StoreEvents.ResourceManuallyCreated]: ResourceCallback;
   [StoreEvents.AgentChanged]: AgentCallback;
   [StoreEvents.ServerURLChanged]: ServerURLCallback;
@@ -388,18 +389,24 @@ export class Store {
 
   /** Opens a Websocket for some subject URL, or returns the existing one. */
   public getWebSocketForSubject(subject: string): WebSocket | undefined {
-    const url = new URL(subject);
-    const found = this.webSockets.get(url.origin);
+    try {
+      const url = new URL(subject);
+      const found = this.webSockets.get(url.origin);
 
-    if (found) {
-      return found;
-    } else {
-      if (typeof window !== 'undefined') {
-        this.webSockets.set(url.origin, startWebsocket(url.origin, this));
+      if (found) {
+        return found;
+      } else {
+        if (typeof window !== 'undefined') {
+          this.webSockets.set(url.origin, startWebsocket(url.origin, this));
+        }
       }
-    }
 
-    return;
+      return;
+    } catch (e) {
+      throw new Error(
+        `Could not open websocket for subject ${subject}: ${e.message}`,
+      );
+    }
   }
 
   /** Returns the base URL of the companion server */
@@ -437,7 +444,12 @@ export class Store {
 
     if (!resource) {
       resource = new Resource<C>(subject, opts.newResource);
-      resource.loading = true;
+
+      // New resources don't have to load, they are just created.
+      if (!opts.newResource) {
+        resource.loading = true;
+      }
+
       this.addResources(resource);
 
       if (!opts.newResource) {
@@ -620,7 +632,7 @@ export class Store {
         Uint8Array.from(atob(content), c => c.charCodeAt(0)),
       );
       const json = JSON.parse(jsonString);
-      const [_, resources] = parser.parseObject(json);
+      const resources = parser.parse(json);
       this.addResources(resources);
     });
   }
@@ -657,13 +669,16 @@ export class Store {
     });
   }
 
-  /** Removes (destroys / deletes) resource from this store */
-  public removeResource(subject: string): void {
+  /** Removes resource from this store, does not delete it from the server, use `resource.destroy()` to delete it from the server. */
+  public removeResource(subject: string, shouldNotify = true): void {
     const resource = this.resources.get(subject);
 
     if (resource) {
       this.resources.delete(subject);
-      this.eventManager.emit(StoreEvents.ResourceRemoved, resource);
+
+      if (shouldNotify) {
+        this.eventManager.emit(StoreEvents.ResourceRemoved, subject);
+      }
     }
   }
 
@@ -877,6 +892,10 @@ export class Store {
       if (lastResource) {
         lastAncestor = lastResource.get(core.properties.parent) as string;
 
+        if (lastAncestor === undefined) {
+          break;
+        }
+
         if (ancestry.includes(lastAncestor)) {
           throw new Error(
             `Resource ${resource.subject} ancestry is cyclical. ${lastAncestor} is already in the ancestry}`,
@@ -1039,7 +1058,6 @@ export class Store {
   }
 
   /** Lets subscribers know that a resource has been changed. Time to update your views.
-   * Make sure the resource is a new reference, otherwise React will not rerender.
    */
   private async notify(resource: Resource): Promise<void> {
     const subject = resource.subject;

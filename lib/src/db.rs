@@ -1,12 +1,14 @@
 //! Persistent, ACID compliant, threadsafe to-disk store.
 //! Powered by Sled - an embedded database.
 
+mod encoding;
 mod migrations;
 mod prop_val_sub_index;
 mod query_index;
 #[cfg(test)]
 pub mod test;
 mod trees;
+mod v1_types;
 mod val_prop_sub_index;
 
 use std::{
@@ -16,25 +18,26 @@ use std::{
     vec,
 };
 
-use tracing::{info, instrument};
-use trees::{Method, Operation, Transaction, Tree};
-
 use crate::{
     agents::ForAgent,
     atoms::IndexAtom,
+    class_extender::{ClassExtender, CommitExtenderContext, GetExtenderContext},
     commit::{CommitOpts, CommitResponse},
     db::{
+        encoding::{decode_propvals, encode_propvals},
         query_index::{requires_query_index, NO_VALUE},
         val_prop_sub_index::find_in_val_prop_sub_index,
     },
-    endpoints::{default_endpoints, Endpoint, HandleGetContext},
+    endpoints::{Endpoint, HandleGetContext},
     errors::{AtomicError, AtomicResult},
+    plugins::plugins,
     resources::PropVals,
-    storelike::{Query, QueryResult, Storelike},
-    urls,
+    storelike::{Query, QueryResult, ResourceResponse, Storelike},
     values::SortableValue,
     Atom, Commit, Resource,
 };
+use tracing::{info, instrument};
+use trees::{Method, Operation, Transaction, Tree};
 
 use self::{
     migrations::migrate_maybe,
@@ -45,6 +48,8 @@ use self::{
     },
     val_prop_sub_index::add_atom_to_valpropsub_index,
 };
+
+use sled::{transaction::TransactionError, Transactional};
 
 // A function called by the Store when a Commit is accepted
 type HandleCommit = Box<dyn Fn(&CommitResponse) + Send + Sync>;
@@ -82,6 +87,8 @@ pub struct Db {
     server_url: String,
     /// Endpoints are checked whenever a resource is requested. They calculate (some properties of) the resource and return it.
     endpoints: Vec<Endpoint>,
+    /// List of class extenders.
+    class_extenders: Vec<ClassExtender>,
     /// Function called whenever a Commit is applied.
     on_commit: Option<Arc<HandleCommit>>,
     /// Where the DB is stored on disk.
@@ -111,7 +118,8 @@ impl Db {
             prop_val_sub_index,
             server_url,
             watched_queries,
-            endpoints: default_endpoints(),
+            endpoints: plugins::default_endpoints(),
+            class_extenders: plugins::default_class_extenders(),
             on_commit: None,
         };
         migrate_maybe(&store).map(|e| format!("Error during migration of database: {:?}", e))?;
@@ -166,7 +174,9 @@ impl Db {
     ) -> AtomicResult<()> {
         let subject = resource.get_subject();
         let propvals = resource.get_propvals();
-        let resource_bin = bincode::serialize(propvals)?;
+
+        let resource_bin = encode_propvals(&propvals)?;
+
         transaction.push(Operation {
             tree: Tree::Resources,
             method: Method::Insert,
@@ -195,15 +205,29 @@ impl Db {
     /// Constructs the value index from all resources in the store. Could take a while.
     pub fn build_index(&self, include_external: bool) -> AtomicResult<()> {
         tracing::info!("Building index (this could take a few minutes for larger databases)");
+        let mut count = 0;
+
         for r in self.all_resources(include_external) {
             let mut transaction = Transaction::new();
-            for atom in r.to_atoms() {
+            for atom in r.to_atoms_iter() {
                 self.add_atom_to_index(&atom, &r, &mut transaction)
                     .map_err(|e| format!("Failed to add atom to index {}. {}", atom, e))?;
             }
             self.apply_transaction(&mut transaction)
                 .map_err(|e| format!("Failed to commit transaction. {}", e))?;
+
+            if count % 1000 == 0 {
+                tracing::info!("Building index, applied transaction: {}", count);
+            }
+
+            if count % 10000 == 0 {
+                tracing::info!("Building index, flushing to disk");
+                self.db.flush()?;
+            }
+
+            count += 1;
         }
+
         tracing::info!("Building index finished!");
         Ok(())
     }
@@ -211,7 +235,8 @@ impl Db {
     /// Internal method for fetching Resource data.
     #[instrument(skip(self))]
     fn set_propvals(&self, subject: &str, propvals: &PropVals) -> AtomicResult<()> {
-        let resource_bin = bincode::serialize(propvals)?;
+        let resource_bin = encode_propvals(&propvals)?;
+
         self.resources.insert(subject.as_bytes(), resource_bin)?;
         Ok(())
     }
@@ -224,7 +249,7 @@ impl Db {
 
     /// Finds resource by Subject, return PropVals HashMap
     /// Deals with the binary API of Sled
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(subject))]
     fn get_propvals(&self, subject: &str) -> AtomicResult<PropVals> {
         let propval_maybe = self
             .resources
@@ -232,19 +257,15 @@ impl Db {
             .map_err(|e| format!("Can't open {} from store: {}", subject, e))?;
         match propval_maybe.as_ref() {
             Some(binpropval) => {
-                let propval: PropVals = bincode::deserialize(binpropval).map_err(|e| {
-                    format!(
-                        "Deserialize propval error: {} {}",
-                        corrupt_db_message(subject),
-                        e
-                    )
-                })?;
+                let propval: PropVals = decode_propvals(binpropval)?;
                 Ok(propval)
             }
-            None => Err(AtomicError::not_found(format!(
-                "Resource {} not found",
-                subject
-            ))),
+            None => {
+                return Err(AtomicError::not_found(format!(
+                    "Resource {} not found",
+                    subject
+                )))
+            }
         }
     }
 
@@ -279,7 +300,7 @@ impl Db {
             return None;
         }
 
-        let propvals: PropVals = bincode::deserialize(&resource_bin)
+        let propvals: PropVals = decode_propvals(&resource_bin)
             .unwrap_or_else(|e| panic!("{}. {}", corrupt_db_message(&subject), e));
 
         Some(Resource::from_propvals(propvals, subject))
@@ -376,11 +397,30 @@ impl Db {
             }
         }
 
-        self.resources.apply_batch(batch_resources)?;
-        self.prop_val_sub_index.apply_batch(batch_propvalsub)?;
-        self.reference_index.apply_batch(batch_valpropsub)?;
-        self.watched_queries.apply_batch(batch_watched_queries)?;
-        self.query_index.apply_batch(batch_query_members)?;
+        (
+            &self.resources,
+            &self.prop_val_sub_index,
+            &self.reference_index,
+            &self.watched_queries,
+            &self.query_index,
+        )
+            .transaction(
+                |(
+                    tx_resources,
+                    tx_prop_val_sub_index,
+                    tx_reference_index,
+                    tx_watched_queries,
+                    tx_query_index,
+                )| {
+                    tx_resources.apply_batch(&batch_resources)?;
+                    tx_prop_val_sub_index.apply_batch(&batch_propvalsub)?;
+                    tx_reference_index.apply_batch(&batch_valpropsub)?;
+                    tx_watched_queries.apply_batch(&batch_watched_queries)?;
+                    tx_query_index.apply_batch(&batch_query_members)?;
+                    Ok::<(), sled::transaction::ConflictableTransactionError<sled::Error>>(())
+                },
+            )
+            .map_err(|e: TransactionError<_>| format!("Failed to apply transaction: {}", e))?;
 
         Ok(())
     }
@@ -417,7 +457,7 @@ impl Db {
                 if let Ok(resource) = self.get_resource_extended(&atom.subject, true, &q.for_agent)
                 {
                     subjects.push(atom.subject.clone());
-                    resources.push(resource);
+                    resources.push(resource.to_single());
                 }
             }
         }
@@ -478,6 +518,75 @@ impl Db {
             .map_err(|e| format!("Checking atom went wrong: {}", e))?;
         }
         Ok(())
+    }
+
+    /// Recursively removes a resource and its children from the database
+    fn recursive_remove(&self, subject: &str, transaction: &mut Transaction) -> AtomicResult<()> {
+        if let Ok(found) = self.get_propvals(subject) {
+            let resource = Resource::from_propvals(found, subject.to_string());
+            transaction.push(Operation::remove_resource(subject));
+            let mut children = resource.get_children(self)?;
+            for child in children.iter_mut() {
+                self.recursive_remove(child.get_subject(), transaction)?;
+            }
+            for (prop, val) in resource.get_propvals() {
+                let remove_atom = crate::Atom::new(subject.into(), prop.clone(), val.clone());
+                self.remove_atom_from_index(&remove_atom, &resource, transaction)?;
+            }
+        } else {
+            return Err(format!(
+                "Resource {} could not be deleted, because it was not found in the store.",
+                subject
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn is_endpoint(&self, url: &url::Url) -> bool {
+        self.endpoints.iter().any(|e| e.path == url.path())
+    }
+
+    #[tracing::instrument(skip(self))]
+    fn call_endpoint(&self, subject: &str, for_agent: &ForAgent) -> AtomicResult<ResourceResponse> {
+        let url = url::Url::parse(subject)?;
+
+        // Check if the subject matches one of the endpoints
+        for endpoint in self.endpoints.iter() {
+            if url.path() == endpoint.path {
+                // Not all Endpoints have a handle function.
+                // If there is none, return the endpoint plainly.
+                let response = if let Some(handle) = endpoint.handle {
+                    // Call the handle function for the endpoint, if it exists.
+                    let context: HandleGetContext = HandleGetContext {
+                        subject: url,
+                        store: self,
+                        for_agent,
+                    };
+                    (handle)(context).map_err(|e| {
+                        format!("Error handling {} Endpoint: {}", endpoint.shortname, e)
+                    })?
+                } else {
+                    endpoint.to_resource_response(self)?
+                };
+
+                // Extended resources must always return the requested subject as their own subject
+                match response {
+                    ResourceResponse::Resource(mut resource) => {
+                        resource.set_subject(subject.into());
+                        return Ok(resource.into());
+                    }
+                    ResourceResponse::ResourceWithReferenced(mut resource, references) => {
+                        resource.set_subject(subject.into());
+                        return Ok(ResourceResponse::ResourceWithReferenced(
+                            resource, references,
+                        ));
+                    }
+                }
+            }
+        }
+
+        Err(format!("No endpoint found for {}", subject).into())
     }
 }
 
@@ -576,22 +685,19 @@ impl Storelike for Db {
         let mut transaction = Transaction::new();
 
         // BEFORE APPLY COMMIT HANDLERS
-        // TODO: Move to something dynamic
         if let Some(resource_new) = &commit_response.resource_new {
-            let _resource_new_classes = resource_new.get_classes(store)?;
-            #[cfg(feature = "db")]
-            for class in &_resource_new_classes {
-                match class.subject.as_str() {
-                    urls::COMMIT => {
-                        return Err("Commits can not be edited or created directly.".into())
-                    }
-                    urls::INVITE => crate::plugins::invite::before_apply_commit(
+            for extender in self.class_extenders.iter() {
+                if extender.resource_has_extender(resource_new)? {
+                    let Some(handler) = extender.before_commit else {
+                        continue;
+                    };
+
+                    (handler)(CommitExtenderContext {
                         store,
-                        &commit_response.commit,
-                        resource_new,
-                    )?,
-                    _other => {}
-                };
+                        commit: &commit_response.commit,
+                        resource: resource_new,
+                    })?;
+                }
             }
         }
 
@@ -642,32 +748,34 @@ impl Storelike for Db {
         // AFTER APPLY COMMIT HANDLERS
         // Commit has been checked and saved.
         // Here you can add side-effects, such as creating new Commits.
-        #[cfg(feature = "db")]
         if let Some(resource_new) = &commit_response.resource_new {
-            let _resource_new_classes = resource_new.get_classes(store)?;
-            #[cfg(feature = "db")]
-            for class in &_resource_new_classes {
-                match class.subject.as_str() {
-                    urls::MESSAGE => crate::plugins::chatroom::after_apply_commit_message(
+            for extender in self.class_extenders.iter() {
+                if extender.resource_has_extender(resource_new)? {
+                    use crate::class_extender::CommitExtenderContext;
+
+                    let Some(handler) = extender.after_commit else {
+                        continue;
+                    };
+
+                    (handler)(CommitExtenderContext {
                         store,
-                        &commit_response.commit,
-                        resource_new,
-                    )?,
-                    _other => {}
-                };
+                        commit: &commit_response.commit,
+                        resource: resource_new,
+                    })?;
+                }
             }
         }
         Ok(commit_response)
     }
 
-    fn get_server_url(&self) -> &str {
-        &self.server_url
+    fn get_server_url(&self) -> AtomicResult<String> {
+        Ok(self.server_url.clone())
     }
 
     // Since the DB is often also the server, this should make sense.
     // Some edge cases might appear later on (e.g. a slave DB that only stores copies?)
     fn get_self_url(&self) -> Option<String> {
-        Some(self.get_server_url().into())
+        self.get_server_url().ok()
     }
 
     fn get_default_agent(&self) -> AtomicResult<crate::agents::Agent> {
@@ -679,14 +787,15 @@ impl Storelike for Db {
 
     #[instrument(skip(self))]
     fn get_resource(&self, subject: &str) -> AtomicResult<Resource> {
-        let propvals = self.get_propvals(subject);
-
-        match propvals {
+        match self.get_propvals(subject) {
             Ok(propvals) => {
                 let resource = crate::resources::Resource::from_propvals(propvals, subject.into());
                 Ok(resource)
             }
-            Err(e) => self.handle_not_found(subject, e, None),
+            Err(e) => {
+                tracing::error!("Error getting resource: {:?}", e);
+                self.handle_not_found(subject, e, None)
+            }
         }
     }
 
@@ -696,7 +805,7 @@ impl Storelike for Db {
         subject: &str,
         skip_dynamic: bool,
         for_agent: &ForAgent,
-    ) -> AtomicResult<Resource> {
+    ) -> AtomicResult<ResourceResponse> {
         let url_span = tracing::span!(tracing::Level::TRACE, "URL parse").entered();
         // This might add a trailing slash
         let url = url::Url::parse(subject)?;
@@ -714,98 +823,68 @@ impl Storelike for Db {
         url_span.exit();
 
         let endpoint_span = tracing::span!(tracing::Level::TRACE, "Endpoint").entered();
-        // Check if the subject matches one of the endpoints
-        for endpoint in self.endpoints.iter() {
-            if url.path() == endpoint.path {
-                // Not all Endpoints have a handle function.
-                // If there is none, return the endpoint plainly.
-                let mut resource = if let Some(handle) = endpoint.handle {
-                    // Call the handle function for the endpoint, if it exists.
-                    let context: HandleGetContext = HandleGetContext {
-                        subject: url,
-                        store: self,
-                        for_agent,
-                    };
-                    (handle)(context).map_err(|e| {
-                        format!("Error handling {} Endpoint: {}", endpoint.shortname, e)
-                    })?
-                } else {
-                    endpoint.to_resource(self)?
-                };
-                // Extended resources must always return the requested subject as their own subject
-                resource.set_subject(subject.into());
-                return Ok(resource.to_owned());
-            }
+
+        // Check if the subject matches one of the endpoints, if so, call the endpoint.
+        if self.is_endpoint(&url) {
+            return self.call_endpoint(subject, for_agent);
         }
+
         endpoint_span.exit();
 
         let dynamic_span =
             tracing::span!(tracing::Level::TRACE, "get_resource_extended (dynamic)").entered();
+
         let mut resource = self.get_resource(&removed_query_params)?;
 
         let _explanation = crate::hierarchy::check_read(self, &resource, for_agent)?;
 
-        // Whether the resource has dynamic properties
-        let mut has_dynamic = false;
         // If a certain class needs to be extended, add it to this match statement
-        for class in resource.get_classes(self)? {
-            match class.subject.as_ref() {
-                crate::urls::COLLECTION => {
-                    has_dynamic = true;
-                    if !skip_dynamic {
-                        resource = crate::collections::construct_collection_from_params(
-                            self,
-                            url.query_pairs(),
-                            &mut resource,
-                            for_agent,
-                        )?;
+        for extender in self.class_extenders.iter() {
+            if extender.resource_has_extender(&resource)? {
+                if skip_dynamic {
+                    // This lets clients know that the resource may have dynamic properties that are currently not included
+                    resource.set(
+                        crate::urls::INCOMPLETE.into(),
+                        crate::Value::Boolean(true),
+                        self,
+                    )?;
+
+                    dynamic_span.exit();
+                    return Ok(resource.into());
+                }
+
+                if let Some(handler) = extender.on_resource_get {
+                    let resource_response = (handler)(GetExtenderContext {
+                        store: self,
+                        url: &url,
+                        db_resource: &mut resource,
+                        for_agent,
+                    })?;
+
+                    dynamic_span.exit();
+
+                    // TODO: Check if we actually need this
+                    // make sure the actual subject matches the one requested - It should not be changed in the logic above
+                    match resource_response {
+                        ResourceResponse::Resource(mut resource) => {
+                            resource.set_subject(subject.into());
+                            return Ok(resource.into());
+                        }
+                        ResourceResponse::ResourceWithReferenced(mut resource, referenced) => {
+                            resource.set_subject(subject.into());
+
+                            return Ok(ResourceResponse::ResourceWithReferenced(
+                                resource, referenced,
+                            ));
+                        }
                     }
                 }
-                crate::urls::INVITE => {
-                    has_dynamic = true;
-                    if !skip_dynamic {
-                        resource = crate::plugins::invite::construct_invite_redirect(
-                            self,
-                            url.query_pairs(),
-                            &mut resource,
-                            for_agent,
-                        )?;
-                    }
-                }
-                crate::urls::DRIVE => {
-                    has_dynamic = true;
-                    if !skip_dynamic {
-                        resource = crate::hierarchy::add_children(self, &mut resource)?;
-                    }
-                }
-                crate::urls::CHATROOM => {
-                    has_dynamic = true;
-                    if !skip_dynamic {
-                        resource = crate::plugins::chatroom::construct_chatroom(
-                            self,
-                            url.clone(),
-                            &mut resource,
-                            for_agent,
-                        )?;
-                    }
-                }
-                _ => {}
             }
         }
-        dynamic_span.exit();
 
-        // make sure the actual subject matches the one requested - It should not be changed in the logic above
         resource.set_subject(subject.into());
 
-        // This lets clients know that the resource may have dynamic properties that are currently not included
-        if has_dynamic && skip_dynamic {
-            resource.set(
-                crate::urls::INCOMPLETE.into(),
-                crate::Value::Boolean(true),
-                self,
-            )?;
-        }
-        Ok(resource)
+        Ok(resource.into())
     }
 
     fn handle_commit(&self, commit_response: &CommitResponse) {
@@ -859,8 +938,9 @@ impl Storelike for Db {
                         for_agent,
                         subject: subj_url,
                     };
-                    let mut resource = fun(handle_post_context)?;
+                    let mut resource = fun(handle_post_context)?.to_single();
                     resource.set_subject(subject.into());
+
                     return Ok(resource);
                 }
             }
@@ -895,22 +975,10 @@ impl Storelike for Db {
     #[instrument(skip(self))]
     fn remove_resource(&self, subject: &str) -> AtomicResult<()> {
         let mut transaction = Transaction::new();
-        if let Ok(found) = self.get_propvals(subject) {
-            let resource = Resource::from_propvals(found, subject.to_string());
-            for (prop, val) in resource.get_propvals() {
-                let remove_atom = crate::Atom::new(subject.into(), prop.clone(), val.clone());
-                self.remove_atom_from_index(&remove_atom, &resource, &mut transaction)?;
-            }
-            let _found = self.resources.remove(subject.as_bytes())?;
-        } else {
-            return Err(format!(
-                "Resource {} could not be deleted, because it was not found in the store.",
-                subject
-            )
-            .into());
-        }
-        self.apply_transaction(&mut transaction)?;
-        Ok(())
+
+        self.recursive_remove(subject, &mut transaction)?;
+
+        self.apply_transaction(&mut transaction)
     }
 
     fn set_default_agent(&self, agent: crate::agents::Agent) {

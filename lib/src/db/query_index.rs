@@ -35,17 +35,20 @@ impl QueryFilter {
         if self.property.is_none() && self.value.is_none() {
             return Err("Cannot watch a query without a property or value. These types of queries are not implemented. See https://github.com/atomicdata-dev/atomic-server/issues/548 ".into());
         };
-        store
-            .watched_queries
-            .insert(bincode::serialize(self)?, b"")?;
+
+        let query_filter_bin = self.encode()?;
+
+        store.watched_queries.insert(query_filter_bin, b"")?;
         Ok(())
     }
 
     /// Check if this [QueryFilter] is being indexed
     pub fn is_watched(&self, store: &Db) -> bool {
+        let query_filter_bin = self.encode().expect("Failed to encode QueryFilter");
+
         store
             .watched_queries
-            .contains_key(bincode::serialize(self).unwrap())
+            .contains_key(&query_filter_bin)
             .unwrap_or(false)
     }
 }
@@ -123,7 +126,7 @@ pub fn query_sorted_indexed(
 
             if should_include_resource(q) {
                 if let Ok(resource) = store.get_resource_extended(subject, true, &q.for_agent) {
-                    resources.push(resource);
+                    resources.push(resource.to_single());
                     subjects.push(subject.into());
                 }
             } else {
@@ -265,8 +268,7 @@ pub fn check_if_atom_matches_watched_query_filters(
     for query in store.watched_queries.iter() {
         // The keys store all the data
         if let Ok((k, _v)) = query {
-            let q_filter = bincode::deserialize::<QueryFilter>(&k)
-                .map_err(|e| format!("Could not deserialize QueryFilter: {}", e))?;
+            let q_filter: QueryFilter = QueryFilter::from_bytes(&k)?;
 
             if let Some(prop) = should_update_property(&q_filter, index_atom, resource) {
                 let update_val = match resource.get(prop) {
@@ -276,7 +278,8 @@ pub fn check_if_atom_matches_watched_query_filters(
                 update_indexed_member(&q_filter, &atom.subject, &update_val, delete, transaction)?;
             }
         } else {
-            return Err(format!("Can't deserialize collection index: {:?}", query).into());
+            tracing::error!("Can't query collection index: {:?}", query);
+            break;
         }
     }
     Ok(())
@@ -327,7 +330,8 @@ pub fn create_query_index_key(
     value: Option<&SortableValue>,
     subject: Option<&str>,
 ) -> AtomicResult<Vec<u8>> {
-    let mut q_filter_bytes: Vec<u8> = bincode::serialize(query_filter)?;
+    let mut q_filter_bytes = query_filter.encode()?;
+
     q_filter_bytes.push(SEPARATION_BIT);
 
     let mut value_bytes: Vec<u8> = if let Some(val) = value {
@@ -342,6 +346,7 @@ pub fn create_query_index_key(
     } else {
         vec![0]
     };
+
     value_bytes.push(SEPARATION_BIT);
 
     let subject_bytes = if let Some(sub) = subject {
@@ -363,19 +368,22 @@ pub fn parse_collection_members_key(bytes: &[u8]) -> AtomicResult<(QueryFilter, 
     let value_bytes = iter.next().ok_or("No value_bytes")?;
     let subject_bytes = iter.next().ok_or("No value_bytes")?;
 
-    let q_filter: QueryFilter = bincode::deserialize(q_filter_bytes)?;
+    let q_filter: QueryFilter = QueryFilter::from_bytes(q_filter_bytes)?;
+
     let value = if !value_bytes.is_empty() {
         std::str::from_utf8(value_bytes)
             .map_err(|e| format!("Can't parse value in members_key: {}", e))?
     } else {
         return Err("Can't parse value in members_key".into());
     };
+
     let subject = if !subject_bytes.is_empty() {
         std::str::from_utf8(subject_bytes)
             .map_err(|e| format!("Can't parse subject in members_key: {}", e))?
     } else {
         return Err("Can't parse subject in members_key".into());
     };
+
     Ok((q_filter, value, subject))
 }
 

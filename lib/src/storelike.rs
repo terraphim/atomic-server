@@ -7,6 +7,7 @@ use crate::{
     hierarchy,
     schema::{Class, Property},
     urls,
+    values::SubResource,
 };
 use crate::{errors::AtomicResult, parse::parse_json_ad_string};
 use crate::{mapping::Mapping, values::Value, Atom, Resource};
@@ -15,6 +16,109 @@ use crate::{mapping::Mapping, values::Value, Atom, Resource};
 pub enum PathReturn {
     Subject(String),
     Atom(Box<Atom>),
+}
+
+pub enum ResourceResponse {
+    Resource(Resource),
+    ResourceWithReferenced(Resource, Vec<Resource>),
+}
+
+impl ResourceResponse {
+    /// Only take the main resource, discard any referenced resources.
+    pub fn to_single(&self) -> Resource {
+        match self {
+            ResourceResponse::Resource(resource) => resource.clone(),
+            ResourceResponse::ResourceWithReferenced(resource, _) => resource.clone(),
+        }
+    }
+
+    pub fn to_json_ad(&self) -> AtomicResult<String> {
+        match self {
+            ResourceResponse::Resource(resource) => Ok(resource.to_json_ad()?),
+            ResourceResponse::ResourceWithReferenced(resource, references) => {
+                let mut list = references.clone();
+                list.push(resource.clone());
+                Ok(Resource::vec_to_json_ad(&list)?)
+            }
+        }
+    }
+
+    pub fn to_json(&self, store: &impl Storelike) -> AtomicResult<String> {
+        match self {
+            ResourceResponse::Resource(resource) => Ok(resource.to_json(store)?),
+            ResourceResponse::ResourceWithReferenced(resource, references) => {
+                let mut list = references.clone();
+                list.push(resource.clone());
+                Ok(Resource::vec_to_json(&list, store)?)
+            }
+        }
+    }
+
+    pub fn to_json_ld(&self, store: &impl Storelike) -> AtomicResult<String> {
+        match self {
+            ResourceResponse::Resource(resource) => Ok(resource.to_json_ld(store)?),
+            ResourceResponse::ResourceWithReferenced(resource, references) => {
+                let mut list = references.clone();
+                list.push(resource.clone());
+                Ok(Resource::vec_to_json_ld(&list, store)?)
+            }
+        }
+    }
+
+    pub fn to_atoms(&self) -> Vec<Atom> {
+        match self {
+            ResourceResponse::Resource(resource) => resource.to_atoms(),
+            ResourceResponse::ResourceWithReferenced(resource, references) => {
+                let mut list = references.clone();
+                list.push(resource.clone());
+                Resource::vec_to_atoms(&list)
+            }
+        }
+    }
+
+    pub fn to_n_triples(&self, store: &impl Storelike) -> AtomicResult<String> {
+        match self {
+            ResourceResponse::Resource(resource) => Ok(resource.to_n_triples(store)?),
+            ResourceResponse::ResourceWithReferenced(resource, references) => {
+                let mut list = references.clone();
+                list.push(resource.clone());
+                Ok(Resource::vec_to_n_triples(&list, store)?)
+            }
+        }
+    }
+
+    /// Takes a vector of resources and returns a ResourceResponse::ResourceWithReferenced
+    /// If the main subject is not found it will Error
+    pub fn from_vec(main_subject: &str, vec: Vec<Resource>) -> AtomicResult<Self> {
+        if vec.len() == 0 {
+            return Err("No resources found".into());
+        }
+        if vec.len() == 1 {
+            return Ok(ResourceResponse::Resource(vec[0].clone()));
+        }
+
+        let mut resource: Option<Resource> = None;
+        let mut referenced = Vec::new();
+
+        for r in vec {
+            if r.get_subject() == main_subject {
+                resource = Some(r);
+            } else {
+                referenced.push(r);
+            }
+        }
+
+        let Some(resource) = resource else {
+            return Err(AtomicError::not_found(format!(
+                "Resource with subject {} not found",
+                main_subject
+            )));
+        };
+
+        Ok(ResourceResponse::ResourceWithReferenced(
+            resource, referenced,
+        ))
+    }
 }
 
 pub type ResourceCollection = Vec<Resource>;
@@ -98,11 +202,13 @@ pub trait Storelike: Sized {
     /// E.g. `https://example.com`
     /// This is where deltas should be sent to.
     /// Also useful for Subject URL generation.
-    fn get_server_url(&self) -> &str;
+    fn get_server_url(&self) -> AtomicResult<String> {
+        Err("No server URL found. Set it using `set_server_url`.".into())
+    }
 
-    /// Returns the root URL where this instance of the store is hosted.
-    /// Should return `None` if this is simply a client and not a server.
+    /// Returns the root URL of where this instance of the store is hosted.
     /// E.g. `https://example.com`
+    /// Should return `None` if this store is a client and not a server.
     fn get_self_url(&self) -> Option<String> {
         None
     }
@@ -150,9 +256,51 @@ pub trait Storelike: Sized {
         subject: &str,
         client_agent: Option<&Agent>,
     ) -> AtomicResult<Resource> {
-        let resource: Resource = crate::client::fetch_resource(subject, self, client_agent)?;
-        self.add_resource_opts(&resource, true, true, true)?;
-        Ok(resource)
+        let response = crate::client::fetch_resource(subject, self, client_agent)?;
+
+        match response {
+            ResourceResponse::Resource(resource) => {
+                self.add_resource_opts(&resource, true, true, true)?;
+
+                Ok(resource)
+            }
+            ResourceResponse::ResourceWithReferenced(resource, referenced) => {
+                self.add_resource_opts(&resource, true, true, true)?;
+                for r in referenced {
+                    self.add_resource_opts(&r, true, true, true)?;
+                }
+
+                Ok(resource)
+            }
+        }
+    }
+
+    /// Performs a full-text search on the Server's /search endpoint.
+    /// Requires a server URL to be set.
+    fn search(
+        &self,
+        query: &str,
+        opts: crate::client::search::SearchOpts,
+    ) -> AtomicResult<Vec<Resource>> {
+        let server_url = self.get_server_url()?;
+        let subject = crate::client::search::build_search_subject(&server_url, query, opts);
+        let resource = self.fetch_resource(&subject, self.get_default_agent().ok().as_ref())?;
+        let results: Vec<Resource> = match resource.get(urls::ENDPOINT_RESULTS) {
+            Ok(Value::ResourceArray(vec)) => vec
+                .iter()
+                .filter_map(|s| match s {
+                    SubResource::Subject(result_subject) => {
+                        match self.get_resource(result_subject) {
+                            Ok(r) => Some(r),
+                            Err(err) => Some(err.into_resource(subject.clone())),
+                        }
+                    }
+                    SubResource::Nested(_) => None,
+                })
+                .collect(),
+            _ => return Err("No 'ENDPOINT_RESULTS' in response from server.".into()),
+        };
+        Ok(results)
     }
 
     /// Returns a full Resource with native Values.
@@ -202,11 +350,11 @@ pub trait Storelike: Sized {
         subject: &str,
         skip_dynamic: bool,
         for_agent: &ForAgent,
-    ) -> AtomicResult<Resource> {
+    ) -> AtomicResult<ResourceResponse> {
         let _ignore = skip_dynamic;
         let resource = self.get_resource(subject)?;
         hierarchy::check_read(self, &resource, for_agent)?;
-        Ok(resource)
+        Ok(resource.into())
     }
 
     /// This function is called whenever a Commit is applied.
@@ -237,7 +385,7 @@ pub trait Storelike: Sized {
         Ok(len)
     }
 
-    /// Removes a resource from the store. Errors if not present.
+    /// Removes a resource and its children from the store. Errors if not present.
     fn remove_resource(&self, subject: &str) -> AtomicResult<()>;
 
     /// Accepts an Atomic Path string, returns the result value (resource or property value)
@@ -269,7 +417,9 @@ pub trait Storelike: Sized {
         // The URL of the next resource
         let mut subject = id_url;
         // Set the currently selectred resource parent, which starts as the root of the search
-        let mut resource = self.get_resource_extended(&subject, false, for_agent)?;
+        let mut resource = self
+            .get_resource_extended(&subject, false, for_agent)?
+            .to_single();
         // During each of the iterations of the loop, the scope changes.
         // Try using pathreturn...
         let mut current: PathReturn = PathReturn::Subject(subject.clone());
@@ -303,7 +453,9 @@ pub trait Storelike: Sized {
                             ))?
                             .to_string();
                         subject = url;
-                        resource = self.get_resource_extended(&subject, false, for_agent)?;
+                        resource = self
+                            .get_resource_extended(&subject, false, for_agent)?
+                            .to_single();
                         current = PathReturn::Subject(subject.clone());
                         continue;
                     }

@@ -206,7 +206,7 @@ impl Commit {
         commit.check_for_circular_parents()?;
         let mut is_new = false;
         // Create a new resource if it doesn't exist yet
-        let mut resource_old = match store.get_resource(&commit.subject) {
+        let resource_old = match store.get_resource(&commit.subject) {
             Ok(rs) => rs,
             Err(_) => {
                 is_new = true;
@@ -233,17 +233,6 @@ impl Commit {
             if is_new {
                 crate::hierarchy::check_append(store, &applied.resource_new, &validate_for.into())?;
             } else {
-                // Set a parent only if the rights checks are to be validated.
-                // If there is no explicit parent set on the previous resource, use a default.
-                // Unless it's a Drive!
-                if resource_old.get(urls::PARENT).is_err() {
-                    let default_parent = store.get_self_url().ok_or("There is no self_url set, and no parent in the Commit. The commit can not be applied.")?;
-                    resource_old.set(
-                        urls::PARENT.into(),
-                        Value::AtomicUrl(default_parent),
-                        store,
-                    )?;
-                }
                 // This should use the _old_ resource, no the new one, as the new one might maliciously give itself write rights.
                 crate::hierarchy::check_write(store, &resource_old, &validate_for.into())?;
             }
@@ -429,10 +418,10 @@ impl Commit {
     #[tracing::instrument(skip(store))]
     pub fn into_resource(&self, store: &impl Storelike) -> AtomicResult<Resource> {
         let commit_subject = match self.signature.as_ref() {
-            Some(sig) => format!("{}/commits/{}", store.get_server_url(), sig),
+            Some(sig) => format!("{}/commits/{}", store.get_server_url()?, sig),
             None => {
                 let now = crate::utils::now();
-                format!("{}/commitsUnsigned/{}", store.get_server_url(), now)
+                format!("{}/commitsUnsigned/{}", store.get_server_url()?, now)
             }
         };
         let mut resource = Resource::new_instance(urls::COMMIT, store)?;
@@ -675,11 +664,12 @@ mod test {
     }
 
     use super::*;
-    use crate::{agents::Agent, Storelike};
+    use crate::{agents::Agent, Store, Storelike};
 
     #[test]
     fn agent_and_commit() {
-        let store = crate::Store::init().unwrap();
+        let store = Store::init().unwrap();
+        store.set_server_url("http://localhost:9883");
         store.populate().unwrap();
         let agent = store.create_agent(Some("test_actor")).unwrap();
         let subject = "https://localhost/new_thing";
@@ -711,7 +701,8 @@ mod test {
 
     #[test]
     fn serialize_commit() {
-        let store = crate::Store::init().unwrap();
+        let store = Store::init().unwrap();
+        store.set_server_url("http://localhost:9883");
         store.populate().unwrap();
         let mut set: HashMap<String, Value> = HashMap::new();
         let shortname = Value::new("shortname", &DataType::String).unwrap();
@@ -739,13 +730,13 @@ mod test {
 
     #[test]
     fn signature_matches() {
+        let store = Store::init().unwrap();
+        store.set_server_url("http://localhost:9883");
         let private_key = "CapMWIhFUT+w7ANv9oCPqrHrwZpkP2JhzF9JnyT6WcI=";
-        let store = crate::Store::init().unwrap();
-        store.populate().unwrap();
-        let agent = Agent::new_from_private_key(None, &store, private_key);
+        let agent = Agent::new_from_private_key(None, &store, private_key).unwrap();
         assert_eq!(
             &agent.subject,
-            "local:store/agents/7LsjMW5gOfDdJzK/atgjQ1t20J/rw8MjVg6xwqm+h8U="
+            "http://localhost:9883/agents/7LsjMW5gOfDdJzK/atgjQ1t20J/rw8MjVg6xwqm+h8U="
         );
         store.add_resource(&agent.to_resource().unwrap()).unwrap();
         let subject = "https://localhost/new_thing";
@@ -760,8 +751,8 @@ mod test {
         let signature = commit.signature.clone().unwrap();
         let serialized = commit.serialize_deterministically_json_ad(&store).unwrap();
 
-        assert_eq!(serialized, "{\"https://atomicdata.dev/properties/createdAt\":0,\"https://atomicdata.dev/properties/isA\":[\"https://atomicdata.dev/classes/Commit\"],\"https://atomicdata.dev/properties/set\":{\"https://atomicdata.dev/properties/description\":\"Some value\",\"https://atomicdata.dev/properties/shortname\":\"someval\"},\"https://atomicdata.dev/properties/signer\":\"local:store/agents/7LsjMW5gOfDdJzK/atgjQ1t20J/rw8MjVg6xwqm+h8U=\",\"https://atomicdata.dev/properties/subject\":\"https://localhost/new_thing\"}");
-        assert_eq!(signature, "JOGRyp1NCulc0RNuuNozgIagQPRoZy0Y5+mbSpHY2DKiN3vqUNYLjXbAPYT6Cga6vSG9zztEIa/ZcbQPo7wgBg==");
+        assert_eq!(serialized, "{\"https://atomicdata.dev/properties/createdAt\":0,\"https://atomicdata.dev/properties/isA\":[\"https://atomicdata.dev/classes/Commit\"],\"https://atomicdata.dev/properties/set\":{\"https://atomicdata.dev/properties/description\":\"Some value\",\"https://atomicdata.dev/properties/shortname\":\"someval\"},\"https://atomicdata.dev/properties/signer\":\"http://localhost:9883/agents/7LsjMW5gOfDdJzK/atgjQ1t20J/rw8MjVg6xwqm+h8U=\",\"https://atomicdata.dev/properties/subject\":\"https://localhost/new_thing\"}");
+        assert_eq!(signature, "pYkM6dC4qFGGh6EXbys6NwmhaPIA6Z7Ij//rPejo5mnBOvs1EFxP0iErfJiUXZgJDi5yK4QOBMb2nf2FIKcUCA==");
     }
 
     #[test]
@@ -775,9 +766,9 @@ mod test {
     }
 
     #[test]
-
     fn invalid_subjects() {
-        let store = crate::Store::init().unwrap();
+        let store = Store::init().unwrap();
+        store.set_server_url("http://localhost:9883");
         store.populate().unwrap();
         let agent = store.create_agent(Some("test_actor")).unwrap();
         let resource = Resource::new("https://localhost/test_resource".into());

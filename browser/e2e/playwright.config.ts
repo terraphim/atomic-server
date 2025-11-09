@@ -16,6 +16,14 @@ const config: PlaywrightTestConfig = {
           origin: 'http://localhost:5173',
           localStorage: [{ name: 'viewTransitionsDisabled', value: 'true' }],
         },
+        {
+          origin: 'http://localhost:9883',
+          localStorage: [{ name: 'viewTransitionsDisabled', value: 'true' }],
+        },
+        {
+          origin: 'http://atomic:9883',
+          localStorage: [{ name: 'viewTransitionsDisabled', value: 'true' }],
+        },
       ],
     },
   },
@@ -29,7 +37,7 @@ const config: PlaywrightTestConfig = {
       },
     ],
   ],
-  retries: 3,
+  retries: 0,
   // timeout: 1000 * 120, // 2 minutes
   projects: [
     {

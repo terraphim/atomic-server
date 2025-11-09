@@ -1,6 +1,6 @@
 import { createRoute, createRouter, Link } from '@tanstack/react-router';
 import { ShowRoute } from './ShowRoute';
-import { SearchRoute } from './SearchRoute';
+import { SearchRoute } from './Search/SearchRoute';
 import { NewRoute } from './NewResource/NewRoute';
 import { AppSettingsRoute } from './AppSettings';
 import { EditRoute } from './EditRoute';
@@ -17,6 +17,7 @@ import { rootRoute, topRoute, appRoute } from './RootRoutes';
 import { unavailableLazyRoute } from './UnavailableLazyRoute';
 import { ImportRoute } from './ImportRoute';
 import { HistoryRoute } from './History/HistoryRoute';
+import { LinkOpenRouter } from './LinkOpenRouter';
 
 const PruneTestsRoute = createRoute({
   getParentRoute: () => appRoute,
@@ -58,6 +59,7 @@ const routeTree = rootRoute.addChildren({
     NewRoute,
     PruneTestsRoute,
     SandboxRoute,
+    LinkOpenRouter,
   }),
   topRoute,
 });

@@ -2,10 +2,10 @@ import { styled } from 'styled-components';
 
 export interface SideBarItemProps {
   disabled?: boolean;
+  current?: boolean;
 }
 
 /** SideBarItem should probably be wrapped in an AtomicLink for optimal behavior */
-// eslint-disable-next-line prettier/prettier
 export const SideBarItem = styled('span')<SideBarItemProps>`
   display: flex;
   min-height: ${props => props.theme.margin * 0.5 + 1}rem;
@@ -21,11 +21,17 @@ export const SideBarItem = styled('span')<SideBarItemProps>`
   &:hover,
   &:focus {
     background-color: ${p => p.theme.colors.bg1};
-    color: ${p => (p.disabled ? p.theme.colors.main : p.theme.colors.text)};
+    // color: ${p => (p.disabled ? p.theme.colors.main : p.theme.colors.text)};
   }
   &:active {
     background-color: ${p => p.theme.colors.bg2};
   }
+
+  ${props =>
+    props.current &&
+    `
+    color: ${props.theme.colors.main};
+  `}
 
   svg {
     font-size: 0.8rem;

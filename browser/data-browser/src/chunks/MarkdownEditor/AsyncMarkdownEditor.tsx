@@ -11,13 +11,16 @@ import { useCallback, useState } from 'react';
 import { BubbleMenu } from './BubbleMenu';
 import { TiptapContextProvider } from './TiptapContext';
 import { ToggleButton } from './ToggleButton';
-import { SlashCommands, suggestion } from './SlashMenu/CommandsExtension';
+import { SlashCommands, buildSuggestion } from './SlashMenu/CommandsExtension';
 import { ExtendedImage } from './ImagePicker';
 import { transition } from '../../helpers/transition';
+import { usePopoverContainer } from '../../components/Popover';
+import { EditorWrapperBase } from './EditorWrapperBase';
 
 export type AsyncMarkdownEditorProps = {
   placeholder?: string;
   initialContent?: string;
+  autoFocus?: boolean;
   onChange?: (content: string) => void;
   id?: string;
   labelId?: string;
@@ -31,11 +34,16 @@ const LINE_HEIGHT = 1.15;
 export default function AsyncMarkdownEditor({
   placeholder,
   initialContent,
+  autoFocus,
   id,
   labelId,
   onChange,
   onBlur,
 }: AsyncMarkdownEditorProps): React.JSX.Element {
+  const containerRef = usePopoverContainer();
+
+  const container = containerRef.current ?? document.body;
+
   const [extensions] = useState(() => [
     StarterKit,
     Markdown,
@@ -65,7 +73,7 @@ export default function AsyncMarkdownEditor({
       placeholder: placeholder ?? 'Start typing...',
     }),
     SlashCommands.configure({
-      suggestion,
+      suggestion: buildSuggestion(container),
     }),
   ]);
 
@@ -76,6 +84,7 @@ export default function AsyncMarkdownEditor({
     extensions,
     content: markdown,
     onBlur,
+    autofocus: !!autoFocus,
     editorProps: {
       attributes: {
         ...(id && { id }),
@@ -103,7 +112,7 @@ export default function AsyncMarkdownEditor({
 
   return (
     <TiptapContextProvider editor={editor}>
-      <EditorWrapper hideEditor={codeMode}>
+      <StyledEditorWrapper hideEditor={codeMode}>
         {codeMode && (
           <RawEditor
             placeholder={placeholder ?? 'Start typing...'}
@@ -126,7 +135,7 @@ export default function AsyncMarkdownEditor({
         >
           <FaCode />
         </FloatingCodeButton>
-      </EditorWrapper>
+      </StyledEditorWrapper>
     </TiptapContextProvider>
   );
 }
@@ -139,61 +148,21 @@ const calcHeight = (value: string) => {
   return `calc(${lines * LINE_HEIGHT}em + 5px)`;
 };
 
-const EditorWrapper = styled.div<{ hideEditor: boolean }>`
-  position: relative;
-  background-color: ${p => p.theme.colors.bg};
-  padding: ${p => p.theme.margin}rem;
+const StyledEditorWrapper = styled(EditorWrapperBase)`
+  min-height: ${MIN_EDITOR_HEIGHT};
   border-radius: ${p => p.theme.radius};
   box-shadow: 0 0 0 1px ${p => p.theme.colors.bg2};
   min-height: ${MIN_EDITOR_HEIGHT};
+  padding: ${p => p.theme.size()};
   ${transition('box-shadow')}
 
   &:focus-within {
     box-shadow: 0 0 0 2px ${p => p.theme.colors.main};
   }
 
-  &:not(:focus-within) {
-    & .tiptap p.is-editor-empty:first-child::before {
-      color: ${p => p.theme.colors.textLight};
-      content: attr(data-placeholder);
-      float: left;
-      height: 0;
-      pointer-events: none;
-    }
-  }
-
   & .tiptap {
-    display: ${p => (p.hideEditor ? 'none' : 'block')};
-    outline: none;
     width: min(100%, 75ch);
     min-height: ${MIN_EDITOR_HEIGHT};
-
-    .tiptap-image {
-      max-width: 100%;
-      height: auto;
-    }
-
-    pre {
-      padding: 0.75rem 1rem;
-      background-color: ${p => p.theme.colors.bg1};
-      border-radius: ${p => p.theme.radius};
-      font-family: monospace;
-
-      code {
-        white-space: pre;
-        color: inherit;
-        padding: 0;
-        background: none;
-        font-size: 0.8rem;
-      }
-    }
-
-    blockquote {
-      margin-inline-start: 0;
-      border-inline-start: 3px solid ${p => p.theme.colors.textLight2};
-      color: ${p => p.theme.colors.textLight};
-      padding-inline-start: 1rem;
-    }
   }
 `;
 

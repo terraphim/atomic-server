@@ -56,6 +56,7 @@ export const dataBrowser = {
     subResources: 'https://atomicdata.dev/properties/subresources',
     tableColumnWidths: 'https://atomicdata.dev/properties/tableColumnWidths',
     tags: 'https://atomicdata.dev/properties/tags',
+    tagList: 'https://atomicdata.dev/ontology/data-browser/property/tag-list',
     url: 'https://atomicdata.dev/property/url',
   },
   __classDefs: {
@@ -307,12 +308,13 @@ declare module '../index.js' {
     [dataBrowser.properties.nextPage]: string;
     [dataBrowser.properties.numberFormatting]: string;
     [dataBrowser.properties.preview]: string;
-    [dataBrowser.properties.publishedAt]: number;
+    [dataBrowser.properties.publishedAt]: string;
     [dataBrowser.properties.replyTo]: string;
     [dataBrowser.properties.resources]: string[];
     [dataBrowser.properties.subResources]: string[];
     [dataBrowser.properties.tableColumnWidths]: string;
     [dataBrowser.properties.tags]: string[];
+    [dataBrowser.properties.tagList]: string[];
     [dataBrowser.properties.url]: string;
   }
 
@@ -341,6 +343,7 @@ declare module '../index.js' {
     [dataBrowser.properties.subResources]: 'subResources';
     [dataBrowser.properties.tableColumnWidths]: 'tableColumnWidths';
     [dataBrowser.properties.tags]: 'tags';
+    [dataBrowser.properties.tagList]: 'tagList';
     [dataBrowser.properties.url]: 'url';
   }
 }

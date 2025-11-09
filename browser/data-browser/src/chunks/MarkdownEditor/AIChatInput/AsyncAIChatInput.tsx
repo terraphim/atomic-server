@@ -1,0 +1,249 @@
+import { EditorContent, useEditor, type JSONContent } from '@tiptap/react';
+import { styled } from 'styled-components';
+import StarterKit from '@tiptap/starter-kit';
+import Mention from '@tiptap/extension-mention';
+import FileHandler from '@tiptap/extension-file-handler';
+import { TiptapContextProvider } from '../TiptapContext';
+import { EditorWrapperBase } from '../EditorWrapperBase';
+import { searchSuggestionBuilder } from './resourceSuggestions';
+import { useRef, useState } from 'react';
+import { EditorEvents } from '../EditorEvents';
+import { Markdown } from 'tiptap-markdown';
+import { useStore } from '@tomic/react';
+import { useSettings } from '../../../helpers/AppSettings';
+import type { Node } from '@tiptap/pm/model';
+import Placeholder from '@tiptap/extension-placeholder';
+import { useMcpServers } from '../../../components/AI/MCP/useMcpServers';
+import type {
+  AtomicResourceSuggestion,
+  MCPResourceSuggestion,
+  MentionItem,
+} from './types';
+import { Row } from '../../../components/Row';
+import {
+  IconButton,
+  IconButtonVariant,
+} from '../../../components/IconButton/IconButton';
+import { FaArrowRight } from 'react-icons/fa6';
+import { addIf } from '../../../helpers/addIf';
+import { useAISettings } from '@components/AI/AISettingsContext';
+
+const createAttribute = (propName: string, dataName: string) => {
+  return {
+    [propName]: {
+      default: null,
+      parseHTML: (element: HTMLElement) => element.getAttribute(dataName),
+      renderHTML: (attributes: Record<string, unknown>) => {
+        if (!attributes[propName]) {
+          return {};
+        }
+
+        return {
+          [dataName]: attributes[propName],
+        };
+      },
+    },
+  };
+};
+
+// Modify the Mention extension to allow serializing to markdown.
+const SerializableMention = Mention.extend({
+  addStorage() {
+    return {
+      markdown: {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        serialize(state: any, node: Node) {
+          state.write('@' + (node.attrs.label || ''));
+          state.renderContent(node);
+          state.flushClose(1);
+        },
+      },
+    };
+  },
+  addAttributes() {
+    return {
+      ...createAttribute('type', 'data-type'),
+      ...createAttribute('serverId', 'data-server-id'),
+      ...createAttribute('mimeType', 'data-mime-type'),
+      ...createAttribute('id', 'data-id'),
+      ...createAttribute('label', 'data-label'),
+      ...createAttribute('isA', 'data-is-a'),
+    };
+  },
+});
+
+interface AsyncAIChatInputProps {
+  hasFiles: boolean;
+  disabled?: boolean;
+  onMentionUpdate: (mentions: MentionItem[]) => void;
+  onChange: (markdown: string) => void;
+  onSubmit: () => void;
+  onFileAdded?: (files: File[]) => void;
+}
+
+const AsyncAIChatInput: React.FC<
+  React.PropsWithChildren<AsyncAIChatInputProps>
+> = ({
+  children,
+  hasFiles,
+  disabled,
+  onMentionUpdate,
+  onChange,
+  onSubmit,
+  onFileAdded,
+}) => {
+  const store = useStore();
+  const { drive } = useSettings();
+  const { mcpServers } = useAISettings();
+  const [markdown, setMarkdown] = useState('');
+
+  const markdownRef = useRef(markdown);
+  const onSubmitRef = useRef(onSubmit);
+  markdownRef.current = markdown;
+  onSubmitRef.current = onSubmit;
+
+  const { serversWithResources, searchResourcesOfServer } = useMcpServers();
+
+  const editor = useEditor(
+    {
+      extensions: [
+        Markdown.configure({
+          html: true,
+        }),
+        StarterKit.extend({
+          addKeyboardShortcuts() {
+            return {
+              Enter: () => {
+                // Check if the cursor is in a code block, if so allow the user to press enter.
+                // Pressing shift + enter will exit the code block.
+                if ('language' in this.editor.getAttributes('codeBlock')) {
+                  return false;
+                }
+
+                // The content has to be read from a ref because this callback is not updated often leading to stale content.
+                onSubmitRef.current();
+                setMarkdown('');
+                this.editor.commands.clearContent();
+
+                return true;
+              },
+            };
+          },
+        }).configure({
+          blockquote: false,
+          bulletList: false,
+          orderedList: false,
+          heading: false,
+          listItem: false,
+          horizontalRule: false,
+          bold: false,
+          strike: false,
+          italic: false,
+        }),
+        SerializableMention.configure({
+          HTMLAttributes: {
+            class: 'ai-chat-mention',
+          },
+          suggestion: searchSuggestionBuilder(
+            store,
+            drive,
+            mcpServers.filter(server =>
+              serversWithResources.includes(server.id),
+            ),
+            searchResourcesOfServer,
+          ),
+          renderText({ options, node }) {
+            return `${options.suggestion.char}bla${node.attrs.title}`;
+          },
+        }),
+        Placeholder.configure({
+          placeholder: 'Ask me anything...',
+        }),
+        ...addIf(
+          !!onFileAdded,
+          FileHandler.configure({
+            onDrop: (_currentEditor, files) => {
+              onFileAdded!(Array.from(files));
+            },
+            onPaste: (_currentEditor, files, htmlContent) => {
+              if (htmlContent) return false;
+
+              onFileAdded!(Array.from(files));
+            },
+          }),
+        ),
+      ],
+      autofocus: true,
+      editable: !disabled,
+    },
+    [serversWithResources, searchResourcesOfServer, disabled],
+  );
+
+  const handleChange = (value: string) => {
+    setMarkdown(value);
+    markdownRef.current = value;
+    onChange(value);
+
+    if (!editor) {
+      return;
+    }
+
+    const mentions = digForMentions(editor.getJSON());
+    onMentionUpdate(mentions);
+  };
+
+  return (
+    <>
+      <EditorWrapper hideEditor={false}>
+        <TiptapContextProvider editor={editor}>
+          <EditorContent editor={editor} />
+          <EditorEvents onChange={handleChange} />
+        </TiptapContextProvider>
+      </EditorWrapper>
+      <Row justify='space-between'>
+        {children}
+        <IconButton
+          disabled={disabled || (markdown.length === 0 && !hasFiles)}
+          onClick={() => {
+            onSubmit();
+            setMarkdown('');
+            editor?.commands.clearContent();
+          }}
+          title='Send'
+          variant={IconButtonVariant.Fill}
+        >
+          <FaArrowRight />
+        </IconButton>
+      </Row>
+    </>
+  );
+};
+
+export default AsyncAIChatInput;
+
+const EditorWrapper = styled(EditorWrapperBase)`
+  padding: ${p => p.theme.size(2)};
+  font-size: 16px;
+  line-height: 1.5;
+
+  .ai-chat-mention {
+    background-color: ${p => p.theme.colors.mainSelectedBg};
+    color: ${p => p.theme.colors.mainSelectedFg};
+    border-radius: 5px;
+    padding-inline: ${p => p.theme.size(1)};
+  }
+`;
+
+function digForMentions(
+  data: JSONContent,
+): Array<MCPResourceSuggestion | AtomicResourceSuggestion> {
+  if (data.type === 'mention') {
+    return [data.attrs as MCPResourceSuggestion | AtomicResourceSuggestion];
+  }
+
+  if (data.content) {
+    return data.content.flatMap(digForMentions);
+  }
+
+  return [];
+}

@@ -3,7 +3,7 @@ import type { Resource } from './resource.js';
 
 export type JSONPrimitive = string | number | boolean;
 export type JSONValue = JSONPrimitive | JSONObject | JSONArray | undefined;
-export type JSONObject = { [member: string]: JSONValue };
+export type JSONObject = { [key: string]: JSONValue };
 export type JSONArray = Array<JSONValue>;
 
 /**
@@ -15,8 +15,7 @@ export function valToArray(val?: JSONValue): JSONArray {
     throw new Error(`Not an array: ${val}, is ${typeof val}`);
   }
 
-  if (val.constructor === Array) {
-    // TODO: check this better
+  if (Array.isArray(val)) {
     return val;
   }
 
@@ -77,13 +76,13 @@ export function valToResource(val: JSONValue): string | Resource {
     throw new Error(`Not a resource: ${val}, is a Date`);
   }
 
-  if (val?.constructor === Array) {
+  if (Array.isArray(val)) {
     throw new Error(`Not a resource: ${val}, is an Array`);
   }
 
   if (typeof val === 'object') {
     const parser = new JSONADParser();
-    const [resource] = parser.parseObject(val as JSONObject, 'nested-resource');
+    const [resource] = parser.parse(val as JSONObject, 'nested-resource');
 
     return resource;
   }

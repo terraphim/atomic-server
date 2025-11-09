@@ -4,6 +4,7 @@ import remarkGFM from 'remark-gfm';
 import { Button } from '../Button';
 import { truncateMarkdown } from '../../helpers/markdown';
 import { FC, useState } from 'react';
+import { AtomicLink } from '../AtomicLink';
 
 type Props = {
   text: string;
@@ -15,6 +16,7 @@ type Props = {
   maxLength?: number;
   className?: string;
   nestedInLink?: boolean;
+  markExternalLinks?: boolean;
 };
 
 const disableElementsInLink = ['a'];
@@ -23,13 +25,12 @@ const disableElementsInLink = ['a'];
 const Markdown: FC<Props> = ({
   text,
   renderGFM = true,
-  maxLength,
+  maxLength = 5000,
   className,
   nestedInLink = false,
+  markExternalLinks = false,
 }) => {
   const [collapsed, setCollapsed] = useState(true);
-
-  maxLength = maxLength || 5000;
 
   if (!text) {
     return null;
@@ -40,6 +41,15 @@ const Markdown: FC<Props> = ({
       <ReactMarkdown
         remarkPlugins={renderGFM ? [remarkGFM] : []}
         disallowedElements={nestedInLink ? disableElementsInLink : undefined}
+        components={
+          markExternalLinks
+            ? {
+                a: ({ node: _node, children, ...props }) => {
+                  return <AtomicLink {...props}>{children}</AtomicLink>;
+                },
+              }
+            : {}
+        }
       >
         {collapsed ? truncateMarkdown(text, maxLength) : text}
       </ReactMarkdown>
@@ -121,6 +131,10 @@ const MarkdownWrapper = styled.div`
     padding: 0.5rem;
 
     border: 1px solid ${props => props.theme.colors.bg2};
+  }
+
+  a {
+    word-break: break-word;
   }
 `;
 

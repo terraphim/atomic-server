@@ -1,15 +1,51 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type PluginOption } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import webfontDownload from 'vite-plugin-webfont-dl';
 import prismjs from 'vite-plugin-prismjs';
+import * as path from 'node:path';
+
 export default defineConfig({
+  resolve: {
+    alias: {
+      '@components': path.resolve(__dirname, 'src/components'),
+      '@views': path.resolve(__dirname, 'src/views'),
+      '@hooks': path.resolve(__dirname, 'src/hooks'),
+      '@helpers': path.resolve(__dirname, 'src/helpers'),
+      '@chunks': path.resolve(__dirname, 'src/chunks'),
+    },
+  },
   plugins: [
     webfontDownload(),
     react({
       babel: {
         plugins: [
-          ['babel-plugin-react-compiler', {}],
+          [
+            'babel-plugin-react-compiler',
+            {
+              logger: {
+                logEvent(filename, event) {
+                  if (event.kind === 'CompileError') {
+                    console.error(`\nCompilation failed: ${filename}`);
+                    console.error(`Reason: ${event.detail.reason}`);
+
+                    if (event.detail.description) {
+                      console.error(`Details: ${event.detail.description}`);
+                    }
+
+                    if (event.detail.loc) {
+                      const { line, column } = event.detail.loc.start;
+                      console.error(`Location: Line ${line}, Column ${column}`);
+                    }
+
+                    if (event.detail.suggestions) {
+                      console.error('Suggestions:', event.detail.suggestions);
+                    }
+                  }
+                },
+              },
+            },
+          ],
           'babel-plugin-styled-components',
         ],
       },
@@ -137,6 +173,9 @@ export default defineConfig({
         assetFileNames: `assets/[name].[ext]`,
       },
     },
+  },
+  html: {
+    cspNonce: 'ATOMICSERVER_NONCE',
   },
   server: {
     strictPort: true,

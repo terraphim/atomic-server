@@ -4,14 +4,15 @@
 //! See https://docs.atomicdata.dev/endpoints.html or https://atomicdata.dev/classes/Endpoint
 
 use crate::{
-    agents::ForAgent, errors::AtomicResult, plugins, urls, Db, Resource, Storelike, Value,
+    agents::ForAgent, errors::AtomicResult, storelike::ResourceResponse, urls, Db, Resource,
+    Storelike, Value,
 };
 
-/// The function that is called when a POST request matches the path
-type HandleGet = fn(context: HandleGetContext) -> AtomicResult<Resource>;
-
 /// The function that is called when a GET request matches the path
-type HandlePost = fn(context: HandlePostContext) -> AtomicResult<Resource>;
+type HandleGet = fn(context: HandleGetContext) -> AtomicResult<ResourceResponse>;
+
+/// The function that is called when a POST request matches the path
+type HandlePost = fn(context: HandlePostContext) -> AtomicResult<ResourceResponse>;
 
 /// Passed to an Endpoint GET request handler.
 #[derive(Debug)]
@@ -58,7 +59,7 @@ pub struct PostEndpoint {
 impl Endpoint {
     /// Converts Endpoint to resource. Does not save it.
     pub fn to_resource(&self, store: &impl Storelike) -> AtomicResult<Resource> {
-        let subject = format!("{}{}", store.get_server_url(), self.path);
+        let subject = format!("{}{}", store.get_server_url()?, self.path);
         let mut resource = store.get_resource_new(&subject);
         resource.set_string(urls::DESCRIPTION.into(), &self.description, store)?;
         resource.set_string(urls::SHORTNAME.into(), &self.shortname, store)?;
@@ -72,22 +73,9 @@ impl Endpoint {
         )?;
         Ok(resource)
     }
-}
 
-pub fn default_endpoints() -> Vec<Endpoint> {
-    vec![
-        plugins::versioning::version_endpoint(),
-        plugins::versioning::all_versions_endpoint(),
-        plugins::path::path_endpoint(),
-        plugins::search::search_endpoint(),
-        plugins::files::upload_endpoint(),
-        plugins::files::download_endpoint(),
-        plugins::export::export_endpoint(),
-        #[cfg(feature = "html")]
-        plugins::bookmark::bookmark_endpoint(),
-        plugins::importer::import_endpoint(),
-        plugins::query::query_endpoint(),
-        #[cfg(debug_assertions)]
-        plugins::prunetests::prune_tests_endpoint(),
-    ]
+    pub fn to_resource_response(&self, store: &impl Storelike) -> AtomicResult<ResourceResponse> {
+        let resource = self.to_resource(store)?;
+        Ok(resource.into())
+    }
 }

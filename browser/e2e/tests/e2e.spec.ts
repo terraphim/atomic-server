@@ -1,6 +1,6 @@
 // This file is copied from `atomic-data-browser` to `atomic-data-server` when `pnpm build-server` is run.
 // This is why the `testConfig` is imported.
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import {
   DEMO_INVITE_NAME,
   FRONTEND_URL,
@@ -23,15 +23,16 @@ import {
   openSubject,
   publicReadRightLocator,
   setTitle,
-  sideBarDriveSwitcher,
   signIn,
   timestamp,
   waitForCommit,
   openAgentPage,
   fillSearchBox,
   waitForCommitOnCurrentResource,
-  currentDialog,
   clickSidebarItem,
+  inDialog,
+  PROPERTIES,
+  anyValue,
 } from './test-utils';
 
 test.describe('data-browser', async () => {
@@ -199,6 +200,9 @@ test.describe('data-browser', async () => {
   });
 
   test('chatroom', async ({ page, browser }) => {
+    const inputLocator = (currentPage: Page) =>
+      currentPage.getByLabel('Chat input');
+
     await signIn(page);
     await newDrive(page);
     const waiter = waitForCommitOnCurrentResource(page);
@@ -208,11 +212,11 @@ test.describe('data-browser', async () => {
       page.getByRole('heading', { name: 'Untitled ChatRoom' }),
     ).toBeVisible();
     const teststring = `My test: ${timestamp()}`;
-    await page.fill('[data-test="message-input"]', teststring);
+    await inputLocator(page).fill(teststring);
     await page.keyboard.press('Enter');
     const chatRoomUrl = (await getCurrentSubject(page)) as string;
     await expect(
-      page.locator('[data-test="message-input"]'),
+      inputLocator(page),
       'Text input not cleared on enter',
     ).toHaveText('');
     await expect(
@@ -229,7 +233,7 @@ test.describe('data-browser', async () => {
 
     await expect(page2.locator(`text=${teststring}`)).toBeVisible();
     const teststring2 = `My reply: ${timestamp()}`;
-    await page2.fill('[data-test="message-input"]', teststring2);
+    await inputLocator(page2).fill(teststring2);
     await page2.keyboard.press('Enter');
     // Both pages should see then new chat message
     await expect(page.locator(`text=${teststring2}`)).toBeVisible();
@@ -311,27 +315,28 @@ test.describe('data-browser', async () => {
     ).toBeVisible();
   });
 
-  test('drive switcher', async ({ page }) => {
-    await signIn(page);
-    await page.click(sideBarDriveSwitcher);
-    // temp disable for trailing slash
-    // const dropdownId = await page
-    //   .locator(sideBarDriveSwitcher)
-    //   .getAttribute('aria-controls');
-    // await page.click(`[id="${dropdownId}"] >> text=Atomic Data`);
-    // await expect(page.locator(currentDriveTitle)).toHaveText('Atomic Data');
+  // test('drive switcher', async ({ page }) => {
+  //   await signIn(page);
+  //   await page.click(sideBarDriveSwitcher);
+  //   // temp disable for trailing slash
+  //   // const dropdownId = await page
+  //   //   .locator(sideBarDriveSwitcher)
+  //   //   .getAttribute('aria-controls');
+  //   // await page.click(`[id="${dropdownId}"] >> text=Atomic Data`);
+  //   // await expect(page.locator(currentDriveTitle)).toHaveText('Atomic Data');
 
-    // Cleanup drives for signed in user
-    await openAgentPage(page);
-    await page.click('text=Edit profile');
-    await page.getByTestId('input-drives-clear').click();
-    await page.click('[data-test="save"]');
-  });
+  //   // Cleanup drives for signed in user
+  //   await openAgentPage(page);
+  //   await page.click('text=Edit profile');
+  //   await page.getByTestId('input-drives-clear').click();
+  //   await page.click('[data-test="save"]');
+  // });
 
   test('configure drive page', async ({ page }) => {
     await signIn(page);
     await openConfigureDrive(page);
-    await expect(currentDriveTitle(page)).toHaveText('localhost');
+    const expectedTitle = new URL(SERVER_URL);
+    await expect(currentDriveTitle(page)).toContainText(expectedTitle.hostname);
 
     // temp disable this, because of trailing slash in base URL
     // await page.click(':text("https://atomicdata.dev") + button:text("Select")');
@@ -384,6 +389,32 @@ test.describe('data-browser', async () => {
     await page.click('button:has-text("Save")');
 
     await expect(page.locator('text=Resource Saved')).toBeVisible();
+  });
+
+  test('delete resource', async ({ page }) => {
+    await signIn(page);
+    await newDrive(page);
+    await newResource('folder', page);
+    // Create a nested resource
+    const parentResource = await getCurrentSubject(page);
+    await page.click('button:has-text("New Resource")');
+    await page.click('button:has-text("folder")');
+    // Get current URL
+    const nestedResource = await getCurrentSubject(page);
+    await openSubject(page, parentResource);
+    await contextMenuClick('delete', page);
+    await page.click('button:has-text("Delete")');
+
+    await expect(page.locator('text=Resource deleted')).toBeVisible();
+
+    await page.reload();
+    await openSubject(page, nestedResource);
+
+    // Expect a 404
+    await expect(
+      page.locator('text=Resource not found'),
+      'Nested resource not deleted',
+    ).toBeVisible();
   });
 
   test('sidebar subresource', async ({ page }) => {
@@ -477,23 +508,23 @@ test.describe('data-browser', async () => {
 
     await clickOption('Create test-prop');
 
-    await expect(
-      page.getByRole('heading', { name: 'New Property' }),
-    ).toBeVisible();
+    await inDialog(page, async (dialog, closeDialogWith) => {
+      await expect(
+        dialog.getByRole('heading', { name: 'new property' }),
+      ).toBeVisible();
 
+      const selectDatatypeOption = await fillSearchBox(
+        dialog,
+        'Datatype',
+        'boolean',
+      );
+      await selectDatatypeOption('booleanEither `true` or `false`');
+
+      await dialog.getByLabel('Description').fill('This is a test prop');
+
+      await closeDialogWith('Save');
+    });
     // Set datatype of new property to boolean
-    const selectDatatypeOption = await fillSearchBox(
-      page,
-      'Datatype',
-      'boolean',
-    );
-    await selectDatatypeOption('booleanEither `true` or `false`');
-
-    await currentDialog(page)
-      .getByLabel('Description')
-      .fill('This is a test prop');
-
-    await currentDialog(page).getByRole('button', { name: 'Save' }).click();
 
     await expect(
       page.getByRole('button', { name: 'test-prop', exact: true }),
@@ -503,29 +534,46 @@ test.describe('data-browser', async () => {
   test('history page', async ({ page }) => {
     await signIn(page);
     await newDrive(page);
+
+    // // commit for saving initial document
+    // const newDocCommit = waitForCommit(page, {
+    //   set: {
+    //     [PROPERTIES.isA]: ['https://atomicdata.dev/classes/Document'],
+    //   },
+    // });
+
+    // commit for initializing the first element (paragraph)
+    const addParagraphCommit = waitForCommit(page, {
+      set: {
+        ['https://atomicdata.dev/properties/documents/elements']: anyValue,
+      },
+    });
     // Create new class from new resource menu
     await newResource('document', page);
 
-    // commit for saving initial document
-    await waitForCommit(page);
-    // commit for initializing the first element (paragraph)
-    await waitForCommit(page);
+    await addParagraphCommit;
+
+    const firstTitleCommit = waitForCommit(page, {
+      set: {
+        ['https://atomicdata.dev/properties/name']: 'First Title',
+      },
+    });
 
     await editTitle('First Title', page);
+
+    await firstTitleCommit;
 
     await expect(
       page.getByRole('heading', { name: 'First Title', level: 1 }),
     ).toBeVisible();
-    // Wait for commit debounce
-    await page.waitForTimeout(500);
 
-    const waiter = waitForCommitOnCurrentResource(page, {
+    const secondTitleCommit = waitForCommit(page, {
       set: {
         ['https://atomicdata.dev/properties/name']: 'Second Title',
       },
     });
     await editTitle('Second Title', page);
-    await waiter;
+    await secondTitleCommit;
 
     await expect(
       page.getByRole('heading', { name: 'Second Title', level: 1 }),

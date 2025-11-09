@@ -1,8 +1,11 @@
 //! A value is the part of an Atom that contains the actual information.
 
 use crate::{
-    datatype::match_datatype, datatype::DataType, errors::AtomicResult, resources::PropVals,
-    utils::check_valid_url, Resource,
+    datatype::{match_datatype, DataType},
+    errors::AtomicResult,
+    resources::PropVals,
+    utils::{check_valid_uri, check_valid_url},
+    Resource,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -23,15 +26,15 @@ pub enum Value {
     /// Unix Epoch datetime in milliseconds
     Timestamp(i64),
     NestedResource(SubResource),
-    Resource(Box<Resource>),
     Boolean(bool),
+    Uri(String),
+    JSON(serde_json::Value),
     Unsupported(UnsupportedValue),
 }
 
 /// A resource in a JSON-AD body can be any of these
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SubResource {
-    Resource(Box<Resource>),
     // I was considering using Resources for these, but that would involve
     // storing the paths in both the NestedResource as well as its parent
     // context, which could produce inconsistencies.
@@ -79,8 +82,9 @@ impl Value {
             Value::Timestamp(_) => DataType::Timestamp,
             // TODO: these datatypes are not the same
             Value::NestedResource(_) => DataType::AtomicUrl,
-            Value::Resource(_) => DataType::AtomicUrl,
             Value::Boolean(_) => DataType::Boolean,
+            Value::Uri(_) => DataType::Uri,
+            Value::JSON(_) => DataType::JSON,
             Value::Unsupported(s) => DataType::Unsupported(s.datatype.clone()),
         }
     }
@@ -113,6 +117,14 @@ impl Value {
             DataType::AtomicUrl => {
                 check_valid_url(value)?;
                 Ok(Value::AtomicUrl(value.into()))
+            }
+            DataType::Uri => {
+                check_valid_uri(value)?;
+                Ok(Value::Uri(value.into()))
+            }
+            DataType::JSON => {
+                let json: serde_json::Value = serde_json::from_str(value)?;
+                Ok(Value::JSON(json))
             }
             DataType::ResourceArray => {
                 let vector: Vec<String> = crate::parse::parse_json_array(value).map_err(|e| {
@@ -173,7 +185,6 @@ impl Value {
                 arr.iter()
                     .enumerate()
                     .for_each(|(i, r)| match r.to_owned() {
-                        SubResource::Resource(e) => vec.push(e.get_subject().into()),
                         SubResource::Nested(_e) => {
                             let path_base = if let Some(p) = &parent_path {
                                 p.to_string()
@@ -193,10 +204,6 @@ impl Value {
             Value::NestedResource(_nr) => {
                 // TODO: change the data model of nested resources to store the subject of the parent, so we can construct a path
                 Err("Can't convert nested resources to subjects.".into())
-            }
-            Value::Resource(r) => {
-                vec.push(r.get_subject().into());
-                Ok(vec)
             }
             other => Err(format!("Value {} is not a Resource Array, but {}", self, other).into()),
         }
@@ -243,7 +250,6 @@ impl Value {
             Value::ResourceArray(_v) => self.to_subjects(None).unwrap_or_else(|_| vec![]),
             Value::AtomicUrl(v) => vec![v.into()],
             // TODO We don't index nested resources for now
-            Value::Resource(_r) => return None,
             Value::NestedResource(_r) => return None,
             // This might result in unnecessarily long strings, sometimes. We may want to shorten them later.
             val => vec![val.to_string()],
@@ -306,7 +312,6 @@ impl From<Vec<SubResource>> for Value {
 impl From<SubResource> for Value {
     fn from(val: SubResource) -> Self {
         match val {
-            SubResource::Resource(r) => r.into(),
             SubResource::Nested(n) => n.into(),
             SubResource::Subject(s) => s.into(),
         }
@@ -331,28 +336,6 @@ impl From<f64> for Value {
     }
 }
 
-impl From<Resource> for Value {
-    fn from(val: Resource) -> Self {
-        Value::Resource(Box::new(val))
-    }
-}
-
-impl From<Box<Resource>> for Value {
-    fn from(val: Box<Resource>) -> Self {
-        Value::Resource((*val).into())
-    }
-}
-
-impl From<Vec<Resource>> for Value {
-    fn from(val: Vec<Resource>) -> Self {
-        let mut vec = Vec::new();
-        for i in val {
-            vec.push(SubResource::Resource(Box::new(i)));
-        }
-        Value::ResourceArray(vec)
-    }
-}
-
 use std::fmt;
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -373,14 +356,10 @@ impl fmt::Display for Value {
             Value::Slug(s) => write!(f, "{}", s),
             Value::String(s) => write!(f, "{}", s),
             Value::Timestamp(i) => write!(f, "{}", i),
-            Value::Resource(r) => write!(
-                f,
-                "{}",
-                r.to_json_ad()
-                    .unwrap_or_else(|_e| format!("Could not serialize resource: {:?}", r))
-            ),
             Value::NestedResource(n) => write!(f, "{:?}", n),
             Value::Boolean(b) => write!(f, "{}", b),
+            Value::Uri(s) => write!(f, "{}", s),
+            Value::JSON(s) => write!(f, "{}", s),
             Value::Unsupported(u) => write!(f, "{}", u.value),
         }
     }
@@ -391,12 +370,6 @@ impl fmt::Display for SubResource {
         let mut s: String = String::new();
 
         match self {
-            SubResource::Resource(r) => {
-                s.push_str(
-                    &r.to_json_ad()
-                        .unwrap_or_else(|_e| format!("Could not serialize resource: {:?}", r)),
-                );
-            }
             SubResource::Nested(pv) => {
                 let serialized = crate::serialize::propvals_to_json_ad_map(pv, None)
                     .unwrap_or_else(|_e| {
@@ -430,7 +403,7 @@ impl From<PropVals> for SubResource {
 
 impl From<Resource> for SubResource {
     fn from(val: Resource) -> Self {
-        SubResource::Resource(Box::new(val))
+        SubResource::Subject(val.get_subject().into())
     }
 }
 
@@ -448,6 +421,16 @@ mod test {
         assert!(date.to_string() == "1200-02-02");
         let float = Value::new("1.123123", &DataType::Float).unwrap();
         assert!(float.to_string() == "1.123123");
+        let uri = Value::new("ldap://[2001:db8::7]/c=GB?objectClass?one", &DataType::Uri).unwrap();
+        assert!(uri.to_string() == "ldap://[2001:db8::7]/c=GB?objectClass?one");
+
+        let json = Value::new("{\"foo\": \"bar\", \"baz\": 123}", &DataType::JSON).unwrap();
+        // Note: JSON serialization switches the order of the keys.
+        assert!(
+            json.to_string() == "{\"baz\":123,\"foo\":\"bar\"}"
+                || json.to_string() == "{\"foo\":\"bar\",\"baz\":123}"
+        );
+
         let converted = Value::from(8);
         assert!(converted.to_string() == "8");
     }
@@ -460,6 +443,12 @@ mod test {
         Value::new("120-02-02", &DataType::Date).unwrap_err();
         Value::new("12000-02-02", &DataType::Date).unwrap_err();
         Value::new("a", &DataType::Float).unwrap_err();
+        Value::new("blabliebla", &DataType::Uri).unwrap_err();
+        Value::new(
+            "{\"foo\": \"bar\", \"trailing comma\": 123,}",
+            &DataType::JSON,
+        )
+        .unwrap_err();
     }
 
     #[test]

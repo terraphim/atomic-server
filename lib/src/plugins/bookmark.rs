@@ -14,6 +14,7 @@ use crate::{
     client::fetch_body,
     endpoints::{Endpoint, HandleGetContext},
     errors::AtomicResult,
+    storelike::ResourceResponse,
     urls,
     values::Value,
     AtomicError, Resource,
@@ -32,7 +33,8 @@ pub fn bookmark_endpoint() -> Endpoint {
     }
 }
 
-fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<Resource> {
+#[tracing::instrument(skip(context))]
+fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<ResourceResponse> {
     let HandleGetContext {
         subject,
         store,
@@ -54,7 +56,7 @@ fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<Resource> 
 
     let (name, path) = match (name, path) {
         (Some(name), Some(path)) => (name, path),
-        _ => return bookmark_endpoint().to_resource(store),
+        _ => return bookmark_endpoint().to_resource_response(store),
     };
 
     let mut resource = Resource::new(subject.to_string());
@@ -91,7 +93,7 @@ fn handle_bookmark_request(context: HandleGetContext) -> AtomicResult<Resource> 
 
     resource.set(urls::PREVIEW.into(), Value::Markdown(md.into()), store)?;
 
-    Ok(resource)
+    Ok(ResourceResponse::Resource(resource))
 }
 
 fn fetch_data(url: &str) -> AtomicResult<String> {

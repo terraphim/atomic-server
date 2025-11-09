@@ -15,6 +15,7 @@ pub struct Store {
     // The store currently holds two stores - that is not ideal
     hashmap: Arc<Mutex<HashMap<String, Resource>>>,
     default_agent: Arc<Mutex<Option<crate::agents::Agent>>>,
+    server_url: Arc<Mutex<Option<String>>>,
 }
 
 impl Store {
@@ -24,9 +25,16 @@ impl Store {
         let store = Store {
             hashmap: Arc::new(Mutex::new(HashMap::new())),
             default_agent: Arc::new(Mutex::new(None)),
+            server_url: Arc::new(Mutex::new(None)),
         };
         crate::populate::populate_base_models(&store)?;
         Ok(store)
+    }
+
+    /// Set the URL of the server which endpoint we are using.
+    /// This is needed for generating correct URLs for Commits, Search, etc.
+    pub fn set_server_url(&self, server_url: &str) {
+        self.server_url.lock().unwrap().replace(server_url.into());
     }
 
     /// Triple Pattern Fragments interface.
@@ -158,14 +166,16 @@ impl Storelike for Store {
         Box::new(self.hashmap.lock().unwrap().clone().into_values())
     }
 
-    fn get_server_url(&self) -> &str {
-        // TODO Should be implemented later when companion functionality is here
-        // https://github.com/atomicdata-dev/atomic-server/issues/6
-        "local:store"
+    fn get_server_url(&self) -> AtomicResult<String> {
+        self.server_url
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or("No server URL found. Set it using `store.set_server_url`.".into())
     }
 
     fn get_self_url(&self) -> Option<String> {
-        Some(self.get_server_url().into())
+        None
     }
 
     fn get_default_agent(&self) -> AtomicResult<Agent> {
@@ -179,6 +189,11 @@ impl Storelike for Store {
         if let Some(resource) = self.hashmap.lock().unwrap().get(subject) {
             return Ok(resource.clone());
         }
+
+        if let Ok(resource) = self.fetch_resource(subject, self.get_default_agent().ok().as_ref()) {
+            return Ok(resource);
+        };
+
         self.handle_not_found(
             subject,
             "Not found in HashMap.".into(),
@@ -187,6 +202,10 @@ impl Storelike for Store {
     }
 
     fn remove_resource(&self, subject: &str) -> AtomicResult<()> {
+        let resource = self.get_resource(subject)?;
+        for child in resource.get_children(self)? {
+            self.remove_resource(child.get_subject())?;
+        }
         self.hashmap
             .lock()
             .unwrap()
@@ -229,7 +248,7 @@ impl Storelike for Store {
             // These nested resources are not fully calculated - they will be presented as -is
             match self.get_resource_extended(subject, true, &q.for_agent) {
                 Ok(resource) => {
-                    resources.push(resource);
+                    resources.push(resource.to_single());
                 }
                 Err(e) => match &e.error_type {
                     crate::AtomicErrorType::NotFoundError => {}

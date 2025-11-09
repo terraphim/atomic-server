@@ -1,4 +1,4 @@
-import { Property, unknownSubject, useStore } from '@tomic/react';
+import { Property, unknownSubject, useCanWrite, useStore } from '@tomic/react';
 import { useCallback, useId, useMemo, useState, type JSX } from 'react';
 import { ContainerFull } from '../../components/Containers';
 import { EditableTitle } from '../../components/EditableTitle';
@@ -24,12 +24,15 @@ import { IconButton } from '../../components/IconButton/IconButton';
 import { FaCode, FaFileCsv } from 'react-icons/fa6';
 import { ResourceCodeUsageDialog } from '../CodeUsage/ResourceCodeUsageDialog';
 import { TableExportDialog } from './TableExportDialog';
+import { TagBar } from '../../components/Tag/TagBar';
 
 const columnToKey = (column: Property) => column.subject;
 
 export function TablePage({ resource }: ResourcePageProps): JSX.Element {
   const store = useStore();
   const titleId = useId();
+
+  const canWrite = useCanWrite(resource);
 
   const [showCodeUsageDialog, setShowCodeUsageDialog] = useState(false);
   const [showExportDialog, setShowExportDialog] = useState(false);
@@ -86,7 +89,7 @@ export function TablePage({ resource }: ResourcePageProps): JSX.Element {
 
       invalidateCollection();
     },
-    [collection, store, invalidateCollection],
+    [collection, store, invalidateCollection, addItemsToHistoryStack],
   );
 
   const handleClearCells = useHandleClearCells(
@@ -115,7 +118,10 @@ export function TablePage({ resource }: ResourcePageProps): JSX.Element {
         />
       );
     },
-    [collection, columns],
+
+    // Resource can update a lot but its internals are stable so removing it from the array saves a lot of rerenders and shouldn't cause issues.
+    // eslint-disable-next-line react-hooks/react-compiler, react-hooks/exhaustive-deps
+    [collection, columns, invalidateCollection, resource.subject],
   );
 
   return (
@@ -132,14 +138,16 @@ export function TablePage({ resource }: ResourcePageProps): JSX.Element {
                 <FaCode />
               </IconButton>
               <IconButton
-                title='Use in code'
+                title='Export to CSV'
                 onClick={() => setShowExportDialog(true)}
               >
                 <FaFileCsv />
               </IconButton>
             </FlexRow>
           </FlexRow>
+          <TagBar resource={resource} />
           <FancyTable
+            readOnly={!canWrite}
             columns={columns}
             columnSizes={columnSizes}
             itemCount={collection.totalMembers + 1}

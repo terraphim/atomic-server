@@ -61,6 +61,8 @@ assert!(fetched_new_resource.get_shortname("description", &store).unwrap().to_st
 pub mod agents;
 pub mod atoms;
 pub mod authentication;
+#[cfg(feature = "db")]
+pub mod class_extender;
 pub mod client;
 pub mod collections;
 pub mod commit;

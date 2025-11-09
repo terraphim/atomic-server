@@ -11,19 +11,25 @@ pub async fn single_page(
     path: actix_web::web::Path<String>,
 ) -> AtomicServerResult<HttpResponse> {
     let template = include_str!("../../assets_tmp/index.html");
-    let subject = format!("{}/{}", appstate.store.get_server_url(), path);
-    let meta_tags: MetaTags = if let Ok(resource) =
+    let csp_nonce = generate_nonce().map_err(|_e| "Failed to generate nonce")?;
+    let subject = format!("{}/{}", appstate.store.get_server_url()?, path);
+    let meta_tags: MetaTags = if let Ok(resource_response) =
         appstate
             .store
             .get_resource_extended(&subject, true, &ForAgent::Public)
     {
-        resource.into()
+        resource_response.into()
     } else {
         MetaTags::default()
     };
 
-    let script = format!("<script>{}</script>", appstate.config.opts.script);
+    let script = format!(
+        "<script nonce=\"{}\">{}</script>",
+        csp_nonce, appstate.config.opts.script
+    );
+
     let body = template
+        .replace("ATOMICSERVER_NONCE", &csp_nonce)
         .replace("<!-- { inject_html_head } -->", &meta_tags.to_string())
         .replace("<!-- { inject_script } -->", &script);
 
@@ -35,12 +41,17 @@ pub async fn single_page(
             "Cache-Control",
             "no-store, no-cache, must-revalidate, private",
         ))
+        .insert_header((
+            "Content-Security-Policy",
+            format!("script-src 'nonce-{}'; worker-src 'self'", csp_nonce),
+        ))
         .body(body);
 
     Ok(resp)
 }
 
 use atomic_lib::agents::ForAgent;
+use atomic_lib::storelike::ResourceResponse;
 use atomic_lib::urls;
 use atomic_lib::Resource;
 use atomic_lib::Storelike;
@@ -51,6 +62,28 @@ struct MetaTags {
     title: String,
     image: String,
     json: Option<String>,
+}
+
+impl From<ResourceResponse> for MetaTags {
+    fn from(rr: ResourceResponse) -> Self {
+        match rr {
+            ResourceResponse::Resource(r) => r.into(),
+            ResourceResponse::ResourceWithReferenced(ref resource, _) => {
+                let mut tags: MetaTags = resource.clone().into();
+
+                let json = if let Ok(serialized) = rr.to_json_ad() {
+                    // TODO: also fetch the parents for extra fast first renders.
+                    Some(serialized)
+                } else {
+                    None
+                };
+
+                tags.json = json;
+
+                tags
+            }
+        }
+    }
 }
 
 impl From<Resource> for MetaTags {
@@ -134,6 +167,17 @@ fn escape_html(s: &str) -> String {
         .replace('\'', "&#x27;")
         .replace('"', "&quot;")
         .replace('/', "&#x2F;")
+}
+
+fn generate_nonce() -> Result<String, ring::error::Unspecified> {
+    use base64::{engine::general_purpose, Engine as _};
+    use ring::rand::{SecureRandom, SystemRandom};
+
+    let mut nonce_bytes = [0u8; 32];
+    let rng = SystemRandom::new();
+    rng.fill(&mut nonce_bytes)?;
+
+    Ok(general_purpose::URL_SAFE_NO_PAD.encode(nonce_bytes))
 }
 
 #[cfg(test)]

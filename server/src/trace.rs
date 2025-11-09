@@ -34,13 +34,44 @@ pub fn init_tracing(config: &crate::config::Config) -> Option<tracing_chrome::Fl
         crate::config::Tracing::Opentelemetry => {
             #[cfg(feature = "telemetry")]
             {
-                println!("Enabling tracing for OpenTelemetry and Jaeger");
-                let tracer = opentelemetry_jaeger::new_agent_pipeline()
-                    .with_service_name("atomic-server")
-                    .install_simple()
-                    .expect("Error initializing Jaeger exporter");
+                use opentelemetry::trace::TracerProvider;
+                use opentelemetry::KeyValue;
+                use opentelemetry_otlp::{Protocol, WithExportConfig};
+                use opentelemetry_sdk::{trace as sdktrace, Resource};
+                use tracing_subscriber::layer::SubscriberExt;
+
+                let endpoint = std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+                    .unwrap_or_else(|_| "http://localhost:4317".into()); // gRPC
+
+                println!("Enabling OTel gRPC at {}", endpoint);
+
+                // gRPC exporter (no `.tonic()` in 0.29, just enable "tonic" feature)
+                let exporter = opentelemetry_otlp::SpanExporter::builder()
+                    .with_tonic()
+                    .with_endpoint(endpoint)
+                    .with_protocol(Protocol::Grpc)
+                    .build()
+                    .expect("build OTLP gRPC exporter");
+
+                let resource = Resource::builder()
+                    .with_attributes(vec![
+                        KeyValue::new("service.name", "atomic-server"),
+                        KeyValue::new("service.version", env!("CARGO_PKG_VERSION")),
+                    ])
+                    .build();
+
+                let provider = sdktrace::SdkTracerProvider::builder()
+                    .with_resource(resource)
+                    .with_sampler(sdktrace::Sampler::AlwaysOn)
+                    .with_batch_exporter(exporter) // runtime is set by Cargo feature
+                    .build();
+
+                let tracer = provider.tracer("atomic-server");
+
                 let layer = tracing_opentelemetry::layer().with_tracer(tracer);
                 tracing_registry.with(layer).init();
+
+                opentelemetry::global::set_tracer_provider(provider);
             }
             #[cfg(not(feature = "telemetry"))]
             {
