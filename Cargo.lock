@@ -578,6 +578,7 @@ version = "0.40.0"
 dependencies = [
  "assert_cmd",
  "atomic_lib",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "colored",
@@ -585,6 +586,7 @@ dependencies = [
  "edit",
  "promptly",
  "regex",
+ "ring 0.17.14",
  "serde",
  "serde_json",
  "tracing",

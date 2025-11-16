@@ -7,11 +7,15 @@
 //! - Snapshot extraction and comparison
 //! - Synchronization with conflict resolution
 
+pub mod crypto;
 pub mod extractor;
 pub mod types;
 pub mod validator;
 
+use atomic_lib::Storelike;
+
 // Re-export commonly used types
+pub use crypto::{AuthorizationValidator, CryptoValidator};
 pub use extractor::Extractor;
 pub use types::{
     ConflictStrategy, DiffReport, ExtractOptions, ExtractedResource, SchemaVersion, SnapshotMetadata,
@@ -45,9 +49,70 @@ pub fn validate_server(
 
     // Validate all resources
     let mut validator = Validator::new(extractor.store(), level);
-    let report = validator.validate_resources(&snapshot.resources);
+    let mut report = validator.validate_resources(&snapshot.resources);
+
+    // If cryptographic validation is requested, also validate commits
+    if level >= ValidationLevel::Cryptographic {
+        let mut crypto_validator = CryptoValidator::new(extractor.store());
+
+        // Find and validate all commit resources
+        for resource in &snapshot.resources {
+            let crypto_errors = crypto_validator.validate_commit(resource);
+            for error in crypto_errors {
+                match error.severity {
+                    types::ErrorSeverity::Error => {
+                        report.add_error(error);
+                        report.summary.signature_failures += 1;
+                    }
+                    types::ErrorSeverity::Warning => report.add_warning(error),
+                    types::ErrorSeverity::Info => report.add_info(error),
+                }
+            }
+        }
+
+        // If authorization validation is requested, check rights
+        if level >= ValidationLevel::Authorization {
+            let mut auth_validator = AuthorizationValidator::new(extractor.store());
+
+            // Validate that commits have proper authorization
+            for resource in &snapshot.resources {
+                if is_commit_resource(resource) {
+                    if let Ok(commit) = atomic_lib::commit::Commit::from_resource(resource.clone())
+                    {
+                        // Check if target resource exists
+                        let target = extractor.store().get_resource(&commit.subject).ok();
+                        let auth_errors =
+                            auth_validator.validate_commit_authorization(&commit, target.as_ref());
+                        for error in auth_errors {
+                            match error.severity {
+                                types::ErrorSeverity::Error => {
+                                    report.add_error(error);
+                                    report.summary.authorization_failures += 1;
+                                }
+                                types::ErrorSeverity::Warning => report.add_warning(error),
+                                types::ErrorSeverity::Info => report.add_info(error),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(report)
+}
+
+/// Check if a resource is a Commit
+fn is_commit_resource(resource: &atomic_lib::Resource) -> bool {
+    use atomic_lib::{urls, Value};
+    if let Ok(Value::ResourceArray(classes)) = resource.get(urls::IS_A) {
+        classes.iter().any(|item| match item {
+            atomic_lib::values::SubResource::Subject(s) => s == urls::COMMIT,
+            _ => false,
+        })
+    } else {
+        false
+    }
 }
 
 /// Extract an ontology from a server
