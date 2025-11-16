@@ -14,6 +14,7 @@ mod get;
 mod new;
 mod print;
 mod search;
+mod validate;
 
 #[derive(Parser)]
 #[command(
@@ -119,6 +120,48 @@ enum Commands {
     Validate,
     /// Print the current agent
     Agent,
+    /// Validate an Atomic Server instance (full validation service)
+    ValidateServer {
+        /// Server URL to validate
+        #[arg(required = true)]
+        url: String,
+
+        /// Agent secret for authentication (optional)
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Validation level (0=Structural, 1=Datatype, 2=Schema, 3=Referential, 4=Cryptographic, 5=Authorization)
+        #[arg(long, default_value = "2")]
+        level: u8,
+
+        /// Output format (json or text)
+        #[arg(long, default_value = "text")]
+        output: String,
+    },
+    /// Extract an ontology from a server to JSON-AD file
+    ExtractOntology {
+        /// Ontology URL to extract
+        #[arg(required = true)]
+        url: String,
+
+        /// Output file path
+        #[arg(long, required = true)]
+        out: String,
+
+        /// Agent secret for authentication
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Detect schema version of a server (V1=10 datatypes, V2=12 datatypes with Uri/JSON)
+    DetectVersion {
+        /// Server URL to check
+        #[arg(required = true)]
+        url: String,
+
+        /// Agent secret for authentication
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -306,7 +349,216 @@ fn exec_command(context: &mut Context) -> AtomicResult<()> {
             let agent = Agent::from_secret(&config.shared.agent_secret).unwrap();
             println!("{}", agent.subject);
         }
+        Commands::ValidateServer {
+            url,
+            agent,
+            level,
+            output,
+        } => {
+            validate_server_command(&url, agent, level, &output)?;
+        }
+        Commands::ExtractOntology { url, out, agent } => {
+            extract_ontology_command(&url, &out, agent)?;
+        }
+        Commands::DetectVersion { url, agent } => {
+            detect_version_command(&url, agent)?;
+        }
     };
+    Ok(())
+}
+
+/// Validate an Atomic Server instance
+fn validate_server_command(
+    url: &str,
+    agent_secret: Option<String>,
+    level: u8,
+    output_format: &str,
+) -> AtomicResult<()> {
+    println!(
+        "{}",
+        format!("Validating server: {}", url).blue().bold()
+    );
+    println!(
+        "{}",
+        format!("Validation level: {}", validate::ValidationLevel::from(level))
+    );
+
+    let validation_level = validate::ValidationLevel::from(level);
+
+    match validate::validate_server(url, agent_secret, validation_level) {
+        Ok(report) => {
+            if output_format == "json" {
+                let json = serde_json::to_string_pretty(&report)
+                    .map_err(|e| format!("Failed to serialize report: {}", e))?;
+                println!("{}", json);
+            } else {
+                // Text output
+                println!("\n{}", "Validation Report".bold().underline());
+                println!(
+                    "Status: {}",
+                    if report.valid {
+                        "PASS".green().bold()
+                    } else {
+                        "FAIL".red().bold()
+                    }
+                );
+
+                println!("\n{}", "Summary:".bold());
+                println!("  Total Resources: {}", report.summary.total_resources);
+                println!(
+                    "  Valid: {}",
+                    report.summary.valid_resources.to_string().green()
+                );
+                println!(
+                    "  Invalid: {}",
+                    if report.summary.invalid_resources > 0 {
+                        report.summary.invalid_resources.to_string().red()
+                    } else {
+                        report.summary.invalid_resources.to_string().normal()
+                    }
+                );
+                println!(
+                    "  Schema Violations: {}",
+                    report.summary.schema_violations
+                );
+                println!(
+                    "  Missing References: {}",
+                    report.summary.missing_references
+                );
+
+                if !report.errors.is_empty() {
+                    println!(
+                        "\n{}",
+                        format!("Errors ({}):", report.errors.len()).red().bold()
+                    );
+                    for (i, error) in report.errors.iter().take(20).enumerate() {
+                        println!(
+                            "  {}. [{}] {}",
+                            i + 1,
+                            error.code.to_string().yellow(),
+                            error.message
+                        );
+                        println!("     Subject: {}", error.subject.dimmed());
+                        if let Some(prop) = &error.property {
+                            println!("     Property: {}", prop.dimmed());
+                        }
+                    }
+                    if report.errors.len() > 20 {
+                        println!("  ... and {} more errors", report.errors.len() - 20);
+                    }
+                }
+
+                if !report.warnings.is_empty() {
+                    println!(
+                        "\n{}",
+                        format!("Warnings ({}):", report.warnings.len())
+                            .yellow()
+                            .bold()
+                    );
+                    for (i, warning) in report.warnings.iter().take(10).enumerate() {
+                        println!("  {}. [{}] {}", i + 1, warning.code, warning.message);
+                    }
+                    if report.warnings.len() > 10 {
+                        println!("  ... and {} more warnings", report.warnings.len() - 10);
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", format!("Validation failed: {}", e).red());
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Extract an ontology to a JSON-AD file
+fn extract_ontology_command(
+    ontology_url: &str,
+    output_path: &str,
+    agent_secret: Option<String>,
+) -> AtomicResult<()> {
+    println!(
+        "{}",
+        format!("Extracting ontology: {}", ontology_url).blue().bold()
+    );
+
+    match validate::extract_ontology(ontology_url, agent_secret) {
+        Ok(extracted_resources) => {
+            // Collect all resources (main + referenced)
+            let mut all_resources = Vec::new();
+            for extracted in &extracted_resources {
+                all_resources.push(extracted.main.clone());
+                all_resources.extend(extracted.referenced.clone());
+            }
+
+            println!("  Found {} resources", all_resources.len());
+
+            // Serialize to JSON-AD
+            let json_ad = atomic_lib::Resource::vec_to_json_ad(&all_resources)
+                .map_err(|e| format!("Failed to serialize to JSON-AD: {}", e))?;
+
+            // Write to file
+            std::fs::write(output_path, json_ad)
+                .map_err(|e| format!("Failed to write to {}: {}", output_path, e))?;
+
+            println!(
+                "{}",
+                format!("Successfully saved to: {}", output_path).green()
+            );
+            println!("  Total resources: {}", extracted_resources.len());
+            println!(
+                "  Including referenced: {}",
+                all_resources.len() - extracted_resources.len()
+            );
+        }
+        Err(e) => {
+            eprintln!("{}", format!("Extraction failed: {}", e).red());
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Detect the schema version of a server
+fn detect_version_command(server_url: &str, agent_secret: Option<String>) -> AtomicResult<()> {
+    println!(
+        "{}",
+        format!("Detecting schema version for: {}", server_url)
+            .blue()
+            .bold()
+    );
+
+    match validate::detect_server_version(server_url, agent_secret) {
+        Ok(version) => {
+            let version_str = match version {
+                validate::SchemaVersion::V1 => {
+                    "V1 (10 datatypes - no Uri/JSON)".yellow().to_string()
+                }
+                validate::SchemaVersion::V2 => "V2 (12 datatypes - includes Uri/JSON)"
+                    .green()
+                    .to_string(),
+            };
+            println!("  Schema Version: {}", version_str);
+
+            match version {
+                validate::SchemaVersion::V1 => {
+                    println!("  {} This server does not support Uri and JSON datatypes.", "WARNING:".yellow().bold());
+                    println!("  Consider updating to the latest atomic-server.");
+                }
+                validate::SchemaVersion::V2 => {
+                    println!("  {} Server supports all current Atomic Data features.", "OK:".green().bold());
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", format!("Version detection failed: {}", e).red());
+            std::process::exit(1);
+        }
+    }
+
     Ok(())
 }
 

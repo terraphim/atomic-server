@@ -578,12 +578,17 @@ version = "0.40.0"
 dependencies = [
  "assert_cmd",
  "atomic_lib",
+ "chrono",
  "clap",
  "colored",
  "dirs",
  "edit",
  "promptly",
  "regex",
+ "serde",
+ "serde_json",
+ "tracing",
+ "url",
 ]
 
 [[package]]
