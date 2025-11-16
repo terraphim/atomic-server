@@ -162,6 +162,62 @@ enum Commands {
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Generate a diff report between two Atomic Server instances
+    DiffServers {
+        /// Source server URL
+        #[arg(required = true)]
+        source: String,
+
+        /// Target server URL
+        #[arg(required = true)]
+        target: String,
+
+        /// Agent secret for authentication
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Output format (json or text)
+        #[arg(long, default_value = "text")]
+        output: String,
+    },
+    /// Synchronize data between two Atomic Server instances
+    SyncServers {
+        /// Source server URL
+        #[arg(required = true)]
+        source: String,
+
+        /// Target server URL
+        #[arg(required = true)]
+        target: String,
+
+        /// Agent secret for authentication (required for write operations)
+        #[arg(long)]
+        agent: Option<String>,
+
+        /// Sync mode: push, pull, or bidirectional
+        #[arg(long, default_value = "push")]
+        mode: String,
+
+        /// Conflict resolution strategy: source, target, latest, manual, or skip
+        #[arg(long, default_value = "source")]
+        conflict_strategy: String,
+
+        /// Perform a dry run without making changes
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Include ontologies in sync
+        #[arg(long)]
+        include_ontologies: bool,
+
+        /// Filter to only sync specific subject patterns (comma-separated)
+        #[arg(long)]
+        filter_subjects: Option<String>,
+
+        /// Output format (json or text)
+        #[arg(long, default_value = "text")]
+        output: String,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -363,6 +419,37 @@ fn exec_command(context: &mut Context) -> AtomicResult<()> {
         Commands::DetectVersion { url, agent } => {
             detect_version_command(&url, agent)?;
         }
+        Commands::DiffServers {
+            source,
+            target,
+            agent,
+            output,
+        } => {
+            diff_servers_command(&source, &target, agent, &output)?;
+        }
+        Commands::SyncServers {
+            source,
+            target,
+            agent,
+            mode,
+            conflict_strategy,
+            dry_run,
+            include_ontologies,
+            filter_subjects,
+            output,
+        } => {
+            sync_servers_command(
+                &source,
+                &target,
+                agent,
+                &mode,
+                &conflict_strategy,
+                dry_run,
+                include_ontologies,
+                filter_subjects,
+                &output,
+            )?;
+        }
     };
     Ok(())
 }
@@ -555,6 +642,264 @@ fn detect_version_command(server_url: &str, agent_secret: Option<String>) -> Ato
         }
         Err(e) => {
             eprintln!("{}", format!("Version detection failed: {}", e).red());
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Generate diff between two servers
+fn diff_servers_command(
+    source_url: &str,
+    target_url: &str,
+    agent_secret: Option<String>,
+    output_format: &str,
+) -> AtomicResult<()> {
+    println!(
+        "{}",
+        format!("Comparing servers:\n  Source: {}\n  Target: {}", source_url, target_url)
+            .blue()
+            .bold()
+    );
+
+    match validate::diff_servers(source_url, target_url, agent_secret) {
+        Ok(diff) => {
+            if output_format == "json" {
+                let json = serde_json::to_string_pretty(&diff)
+                    .map_err(|e| format!("Failed to serialize diff: {}", e))?;
+                println!("{}", json);
+            } else {
+                println!("\n{}", "Diff Report".bold().underline());
+                println!("Source: {}", diff.source_url);
+                println!("Target: {}", diff.target_url);
+
+                println!("\n{}", "Summary:".bold());
+                println!("  Total Differences: {}", diff.summary.total_differences);
+                println!(
+                    "  Resources Added (in source only): {}",
+                    diff.summary.resources_added.to_string().green()
+                );
+                println!(
+                    "  Resources Removed (in target only): {}",
+                    diff.summary.resources_removed.to_string().red()
+                );
+                println!(
+                    "  Resources Modified: {}",
+                    diff.summary.resources_modified.to_string().yellow()
+                );
+                println!("  Schema Changes: {}", diff.summary.schema_changes);
+
+                if !diff.source_only.is_empty() {
+                    println!(
+                        "\n{}",
+                        format!("New Resources in Source ({}):", diff.source_only.len())
+                            .green()
+                            .bold()
+                    );
+                    for (i, subject) in diff.source_only.iter().take(10).enumerate() {
+                        println!("  {}. {}", i + 1, subject);
+                    }
+                    if diff.source_only.len() > 10 {
+                        println!("  ... and {} more", diff.source_only.len() - 10);
+                    }
+                }
+
+                if !diff.target_only.is_empty() {
+                    println!(
+                        "\n{}",
+                        format!("Resources Only in Target ({}):", diff.target_only.len())
+                            .red()
+                            .bold()
+                    );
+                    for (i, subject) in diff.target_only.iter().take(10).enumerate() {
+                        println!("  {}. {}", i + 1, subject);
+                    }
+                    if diff.target_only.len() > 10 {
+                        println!("  ... and {} more", diff.target_only.len() - 10);
+                    }
+                }
+
+                if !diff.modified.is_empty() {
+                    println!(
+                        "\n{}",
+                        format!("Modified Resources ({}):", diff.modified.len())
+                            .yellow()
+                            .bold()
+                    );
+                    for (i, resource_diff) in diff.modified.iter().take(10).enumerate() {
+                        println!("  {}. {}", i + 1, resource_diff.subject);
+                        println!(
+                            "     Added props: {}, Removed: {}, Modified: {}",
+                            resource_diff.added_properties.len(),
+                            resource_diff.removed_properties.len(),
+                            resource_diff.modified_properties.len()
+                        );
+                    }
+                    if diff.modified.len() > 10 {
+                        println!("  ... and {} more", diff.modified.len() - 10);
+                    }
+                }
+
+                if diff.summary.schema_changes > 0 {
+                    println!("\n{}", "Schema Changes:".bold());
+                    if !diff.schema_changes.new_classes.is_empty() {
+                        println!(
+                            "  New Classes: {}",
+                            diff.schema_changes.new_classes.len()
+                        );
+                    }
+                    if !diff.schema_changes.new_properties.is_empty() {
+                        println!(
+                            "  New Properties: {}",
+                            diff.schema_changes.new_properties.len()
+                        );
+                    }
+                    if !diff.schema_changes.new_ontologies.is_empty() {
+                        println!(
+                            "  New Ontologies: {}",
+                            diff.schema_changes.new_ontologies.len()
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", format!("Diff failed: {}", e).red());
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Synchronize data between two servers
+fn sync_servers_command(
+    source_url: &str,
+    target_url: &str,
+    agent_secret: Option<String>,
+    mode: &str,
+    conflict_strategy: &str,
+    dry_run: bool,
+    include_ontologies: bool,
+    filter_subjects: Option<String>,
+    output_format: &str,
+) -> AtomicResult<()> {
+    let sync_mode = mode
+        .parse::<validate::SyncMode>()
+        .map_err(|e| format!("Invalid sync mode: {}", e))?;
+    let strategy = conflict_strategy
+        .parse::<validate::ConflictStrategy>()
+        .map_err(|e| format!("Invalid conflict strategy: {}", e))?;
+
+    let filter = filter_subjects.map(|s| s.split(',').map(|x| x.trim().to_string()).collect());
+
+    let options = validate::SyncOptions {
+        mode: sync_mode,
+        conflict_strategy: strategy,
+        include_ontologies,
+        dry_run,
+        filter_subjects: filter,
+        ..Default::default()
+    };
+
+    println!(
+        "{}",
+        format!(
+            "Synchronizing servers:\n  Source: {}\n  Target: {}\n  Mode: {:?}\n  Strategy: {:?}{}",
+            source_url,
+            target_url,
+            sync_mode,
+            strategy,
+            if dry_run { "\n  [DRY RUN]" } else { "" }
+        )
+        .blue()
+        .bold()
+    );
+
+    match validate::sync_servers(source_url, target_url, agent_secret, options) {
+        Ok(report) => {
+            if output_format == "json" {
+                let json = serde_json::to_string_pretty(&report)
+                    .map_err(|e| format!("Failed to serialize report: {}", e))?;
+                println!("{}", json);
+            } else {
+                println!("\n{}", "Sync Report".bold().underline());
+                println!(
+                    "Status: {}",
+                    if report.success {
+                        "SUCCESS".green().bold()
+                    } else {
+                        "FAILED".red().bold()
+                    }
+                );
+
+                println!("\n{}", "Results:".bold());
+                println!(
+                    "  Resources Created: {}",
+                    report.resources_created.to_string().green()
+                );
+                println!(
+                    "  Resources Updated: {}",
+                    report.resources_updated.to_string().yellow()
+                );
+                println!(
+                    "  Resources Deleted: {}",
+                    report.resources_deleted.to_string().red()
+                );
+
+                if !report.conflicts.is_empty() {
+                    println!(
+                        "\n{}",
+                        format!("Conflicts ({}):", report.conflicts.len())
+                            .yellow()
+                            .bold()
+                    );
+                    for (i, conflict) in report.conflicts.iter().take(10).enumerate() {
+                        println!("  {}. {}", i + 1, conflict.subject);
+                        println!("     Property: {}", conflict.property);
+                        println!(
+                            "     Resolution: {:?}",
+                            conflict.resolution.as_ref().unwrap_or(&validate::types::ConflictResolution::Manual)
+                        );
+                    }
+                    if report.conflicts.len() > 10 {
+                        println!("  ... and {} more", report.conflicts.len() - 10);
+                    }
+                }
+
+                if !report.errors.is_empty() {
+                    println!(
+                        "\n{}",
+                        format!("Errors ({}):", report.errors.len()).red().bold()
+                    );
+                    for (i, error) in report.errors.iter().take(10).enumerate() {
+                        println!("  {}. {}: {}", i + 1, error.subject, error.error);
+                    }
+                    if report.errors.len() > 10 {
+                        println!("  ... and {} more", report.errors.len() - 10);
+                    }
+                }
+
+                if !report.warnings.is_empty() {
+                    println!("\n{}", "Warnings:".yellow().bold());
+                    for warning in &report.warnings {
+                        println!("  - {}", warning);
+                    }
+                }
+
+                if dry_run {
+                    println!(
+                        "\n{}",
+                        "This was a dry run. No changes were made."
+                            .yellow()
+                            .bold()
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", format!("Sync failed: {}", e).red());
             std::process::exit(1);
         }
     }

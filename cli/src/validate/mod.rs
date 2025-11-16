@@ -9,6 +9,7 @@
 
 pub mod crypto;
 pub mod extractor;
+pub mod sync;
 pub mod types;
 pub mod validator;
 
@@ -17,6 +18,7 @@ use atomic_lib::Storelike;
 // Re-export commonly used types
 pub use crypto::{AuthorizationValidator, CryptoValidator};
 pub use extractor::Extractor;
+pub use sync::SyncEngine;
 pub use types::{
     ConflictStrategy, DiffReport, ExtractOptions, ExtractedResource, SchemaVersion, SnapshotMetadata,
     StoreSnapshot, SyncMode, SyncOptions, SyncReport, ValidationError, ValidationErrorCode,
@@ -171,6 +173,53 @@ pub fn detect_server_version(
         .map_err(|e| format!("Failed to create extractor: {}", e))?;
 
     Ok(extractor.detect_schema_version())
+}
+
+/// Generate a diff report between two servers
+pub fn diff_servers(
+    source_url: &str,
+    target_url: &str,
+    agent_secret: Option<String>,
+) -> Result<DiffReport, String> {
+    let agent = if let Some(secret) = agent_secret {
+        Some(
+            atomic_lib::agents::Agent::from_secret(&secret)
+                .map_err(|e| format!("Invalid agent secret: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let engine = SyncEngine::new(source_url, target_url, agent, SyncOptions::default())
+        .map_err(|e| format!("Failed to create sync engine: {}", e))?;
+
+    engine
+        .generate_diff()
+        .map_err(|e| format!("Failed to generate diff: {}", e))
+}
+
+/// Synchronize data between two servers
+pub fn sync_servers(
+    source_url: &str,
+    target_url: &str,
+    agent_secret: Option<String>,
+    options: SyncOptions,
+) -> Result<SyncReport, String> {
+    let agent = if let Some(secret) = agent_secret {
+        Some(
+            atomic_lib::agents::Agent::from_secret(&secret)
+                .map_err(|e| format!("Invalid agent secret: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let mut engine = SyncEngine::new(source_url, target_url, agent, options)
+        .map_err(|e| format!("Failed to create sync engine: {}", e))?;
+
+    engine
+        .synchronize()
+        .map_err(|e| format!("Synchronization failed: {}", e))
 }
 
 #[cfg(test)]
