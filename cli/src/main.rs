@@ -228,6 +228,26 @@ enum Commands {
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Create a snapshot of a server's resources
+    CreateSnapshot {
+        /// Server URL to snapshot
+        #[arg(required = true)]
+        url: String,
+
+        /// Output file path for the snapshot
+        #[arg(long, required = true)]
+        out: String,
+
+        /// Agent secret for authentication
+        #[arg(long)]
+        agent: Option<String>,
+    },
+    /// Load and display information about a snapshot file
+    SnapshotInfo {
+        /// Path to the snapshot file
+        #[arg(required = true)]
+        file: String,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -462,6 +482,12 @@ fn exec_command(context: &mut Context) -> AtomicResult<()> {
         }
         Commands::TestConnection { url, agent } => {
             test_connection_command(&url, agent)?;
+        }
+        Commands::CreateSnapshot { url, out, agent } => {
+            create_snapshot_command(&url, &out, agent)?;
+        }
+        Commands::SnapshotInfo { file } => {
+            snapshot_info_command(&file)?;
         }
     };
     Ok(())
@@ -914,6 +940,123 @@ fn sync_servers_command(
         Err(e) => {
             eprintln!("{}", format!("Sync failed: {}", e).red());
             std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Create a snapshot of a server
+fn create_snapshot_command(
+    server_url: &str,
+    output_path: &str,
+    agent_secret: Option<String>,
+) -> AtomicResult<()> {
+    println!(
+        "{}",
+        format!("Creating snapshot of: {}", server_url).blue().bold()
+    );
+
+    let agent = if let Some(secret) = agent_secret {
+        Some(
+            atomic_lib::agents::Agent::from_secret(&secret)
+                .map_err(|e| format!("Invalid agent secret: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let extractor = validate::Extractor::new(server_url, agent)
+        .map_err(|e| format!("Failed to create extractor: {}", e))?;
+
+    println!("  Fetching resources...");
+    let snapshot = extractor
+        .create_snapshot(None)
+        .map_err(|e| format!("Failed to create snapshot: {}", e))?;
+
+    println!("  Found {} resources", snapshot.resources.len());
+    println!("  Schema version: {:?}", snapshot.schema_version);
+
+    // Save to file
+    extractor
+        .save_snapshot(&snapshot, output_path)
+        .map_err(|e| format!("Failed to save snapshot: {}", e))?;
+
+    println!(
+        "{}",
+        format!("Successfully saved snapshot to: {}", output_path).green()
+    );
+    println!("\n{}", "Snapshot Metadata:".bold());
+    println!("  Server URL: {}", snapshot.server_url);
+    println!("  Total Resources: {}", snapshot.metadata.total_resources);
+    println!(
+        "  Referenced Resources: {}",
+        snapshot.metadata.referenced_resources
+    );
+    println!("  Classes: {}", snapshot.metadata.class_count);
+    println!("  Properties: {}", snapshot.metadata.property_count);
+    println!("  Ontologies: {}", snapshot.metadata.ontology_count);
+    println!("  Agents: {}", snapshot.metadata.agent_count);
+    println!("  Commits: {}", snapshot.metadata.commit_count);
+
+    Ok(())
+}
+
+/// Display information about a snapshot file
+fn snapshot_info_command(file_path: &str) -> AtomicResult<()> {
+    println!(
+        "{}",
+        format!("Loading snapshot from: {}", file_path).blue().bold()
+    );
+
+    let extractor = validate::Extractor::new("http://localhost", None)
+        .map_err(|e| format!("Failed to create extractor: {}", e))?;
+
+    let snapshot = extractor
+        .load_snapshot(file_path)
+        .map_err(|e| format!("Failed to load snapshot: {}", e))?;
+
+    println!("\n{}", "Snapshot Information".bold().underline());
+    println!("File: {}", file_path);
+    println!("Server URL: {}", snapshot.server_url);
+    println!("Schema Version: {:?}", snapshot.schema_version);
+    println!(
+        "Extracted At: {}",
+        chrono::DateTime::from_timestamp(snapshot.extracted_at, 0)
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_else(|| "Unknown".to_string())
+    );
+
+    println!("\n{}", "Resource Statistics:".bold());
+    println!("  Total Resources: {}", snapshot.resources.len());
+    println!(
+        "  Referenced Resources: {}",
+        snapshot.referenced_resources.len()
+    );
+    println!("  Classes: {}", snapshot.metadata.class_count);
+    println!("  Properties: {}", snapshot.metadata.property_count);
+    println!("  Ontologies: {}", snapshot.metadata.ontology_count);
+    println!("  Agents: {}", snapshot.metadata.agent_count);
+    println!("  Commits: {}", snapshot.metadata.commit_count);
+
+    if !snapshot.metadata.datatype_usage.is_empty() {
+        println!("\n{}", "Datatype Usage:".bold());
+        let mut usage: Vec<_> = snapshot.metadata.datatype_usage.iter().collect();
+        usage.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+
+        for (datatype, count) in usage.iter().take(10) {
+            println!("  {}: {}", datatype, count);
+        }
+    }
+
+    // Show sample of resources
+    if !snapshot.resources.is_empty() {
+        println!("\n{}", "Sample Resources (first 5):".bold());
+        for (i, resource) in snapshot.resources.iter().take(5).enumerate() {
+            println!("  {}. {}", i + 1, resource.get_subject());
+        }
+        if snapshot.resources.len() > 5 {
+            println!("  ... and {} more", snapshot.resources.len() - 5);
         }
     }
 
