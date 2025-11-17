@@ -7,6 +7,7 @@
 //! - Snapshot extraction and comparison
 //! - Synchronization with conflict resolution
 
+pub mod client;
 pub mod crypto;
 pub mod extractor;
 pub mod sync;
@@ -16,6 +17,7 @@ pub mod validator;
 use atomic_lib::Storelike;
 
 // Re-export commonly used types
+pub use client::{AtomicClient, BatchResult, ClientConfig, ClientStats, ServerInfo};
 pub use crypto::{AuthorizationValidator, CryptoValidator};
 pub use extractor::Extractor;
 pub use sync::SyncEngine;
@@ -220,6 +222,54 @@ pub fn sync_servers(
     engine
         .synchronize()
         .map_err(|e| format!("Synchronization failed: {}", e))
+}
+
+/// Test connectivity to a server
+pub fn test_server_connection(
+    server_url: &str,
+    agent_secret: Option<String>,
+) -> Result<ServerInfo, String> {
+    let agent = if let Some(secret) = agent_secret {
+        Some(
+            atomic_lib::agents::Agent::from_secret(&secret)
+                .map_err(|e| format!("Invalid agent secret: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let mut client = AtomicClient::new(agent);
+    client
+        .test_connection(server_url)
+        .map_err(|e| format!("Connection test failed: {}", e))
+}
+
+/// Compare two servers and provide a summary
+pub fn compare_servers(
+    server1_url: &str,
+    server2_url: &str,
+    agent_secret: Option<String>,
+) -> Result<(ServerInfo, ServerInfo), String> {
+    let agent = if let Some(secret) = agent_secret {
+        Some(
+            atomic_lib::agents::Agent::from_secret(&secret)
+                .map_err(|e| format!("Invalid agent secret: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    let mut client = AtomicClient::new(agent);
+
+    let info1 = client
+        .test_connection(server1_url)
+        .map_err(|e| format!("Failed to connect to {}: {}", server1_url, e))?;
+
+    let info2 = client
+        .test_connection(server2_url)
+        .map_err(|e| format!("Failed to connect to {}: {}", server2_url, e))?;
+
+    Ok((info1, info2))
 }
 
 #[cfg(test)]

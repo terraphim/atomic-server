@@ -218,6 +218,16 @@ enum Commands {
         #[arg(long, default_value = "text")]
         output: String,
     },
+    /// Test connectivity to an Atomic Server
+    TestConnection {
+        /// Server URL to test
+        #[arg(required = true)]
+        url: String,
+
+        /// Agent secret for authentication
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
@@ -449,6 +459,9 @@ fn exec_command(context: &mut Context) -> AtomicResult<()> {
                 filter_subjects,
                 &output,
             )?;
+        }
+        Commands::TestConnection { url, agent } => {
+            test_connection_command(&url, agent)?;
         }
     };
     Ok(())
@@ -900,6 +913,49 @@ fn sync_servers_command(
         }
         Err(e) => {
             eprintln!("{}", format!("Sync failed: {}", e).red());
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+/// Test connectivity to a server
+fn test_connection_command(server_url: &str, agent_secret: Option<String>) -> AtomicResult<()> {
+    println!(
+        "{}",
+        format!("Testing connection to: {}", server_url)
+            .blue()
+            .bold()
+    );
+
+    match validate::test_server_connection(server_url, agent_secret) {
+        Ok(info) => {
+            println!("\n{}", "Connection Test Results".bold().underline());
+            println!("Server URL: {}", info.url);
+            println!(
+                "Status: {}",
+                if info.reachable {
+                    "REACHABLE".green().bold()
+                } else {
+                    "UNREACHABLE".red().bold()
+                }
+            );
+            println!("Latency: {}ms", info.latency_ms.to_string().cyan());
+            println!("Response Size: {} bytes", info.response_size);
+
+            if info.latency_ms < 100 {
+                println!("{}", "  Excellent connectivity!".green());
+            } else if info.latency_ms < 500 {
+                println!("{}", "  Good connectivity".green());
+            } else if info.latency_ms < 2000 {
+                println!("{}", "  Moderate latency".yellow());
+            } else {
+                println!("{}", "  High latency - may affect sync performance".red());
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", format!("Connection test failed: {}", e).red());
             std::process::exit(1);
         }
     }
