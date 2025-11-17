@@ -590,7 +590,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
- "ureq",
  "url",
 ]
 

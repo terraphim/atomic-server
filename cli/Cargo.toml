@@ -27,7 +27,6 @@ tracing = "0.1"
 url = "2"
 ring = "0.17"
 base64 = "0.22"
-ureq = "2"
 
 [dev-dependencies]
 assert_cmd = "2"

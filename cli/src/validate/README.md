@@ -9,7 +9,7 @@ A comprehensive validation and synchronization service for Atomic Data servers, 
 - **6 Validation Levels**: From structural parsing to authorization checking
 - **Cryptographic Validation**: ED25519 signature verification for commits
 - **Synchronization Engine**: Diff generation, conflict resolution, bidirectional sync
-- **HTTP Client**: Retry logic, progress reporting, connectivity testing
+- **Connectivity Testing**: Server reachability and latency measurement using atomic_lib::client
 
 ## CLI Commands
 
@@ -107,9 +107,10 @@ cli/src/validate/
 ├── validator.rs    # Validation logic (700+ lines)
 ├── crypto.rs       # Cryptographic validation (620+ lines)
 ├── sync.rs         # Synchronization engine (1000+ lines)
-├── client.rs       # HTTP client with retry (410+ lines)
 └── README.md       # This documentation
 ```
+
+Note: HTTP operations use `atomic_lib::client` directly for fetch and post operations, avoiding code duplication.
 
 ## Programmatic Usage
 
@@ -122,7 +123,6 @@ use atomic_cli::validate::{
     SyncOptions,
     ConflictStrategy,
     SyncMode,
-    AtomicClient,
 };
 
 // Validate a server
